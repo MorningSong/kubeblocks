@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -29,238 +29,43 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
 
-	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
-	"github.com/apecloud/kubeblocks/pkg/constant"
-	intctrlutil "github.com/apecloud/kubeblocks/pkg/controllerutil"
+	appsv1 "github.com/apecloud/kubeblocks/apis/apps/v1"
 	testapps "github.com/apecloud/kubeblocks/pkg/testutil/apps"
-	viper "github.com/apecloud/kubeblocks/pkg/viperx"
 )
 
 var _ = Describe("Component", func() {
 
 	Context("has the BuildComponent function", func() {
 		const (
-			clusterDefName           = "test-clusterdef"
-			clusterVersionName       = "test-clusterversion"
-			clusterName              = "test-cluster"
-			mysqlCompDefName         = "replicasets"
-			mysqlCompName            = "mysql"
-			proxyCompDefName         = "proxy"
-			proxyCompName            = "proxy"
-			mysqlSecretUserEnvName   = "MYSQL_ROOT_USER"
-			mysqlSecretPasswdEnvName = "MYSQL_ROOT_PASSWORD"
+			compDefName   = "test-compdef"
+			clusterName   = "test-cluster"
+			mysqlCompName = "mysql"
 		)
 
 		var (
-			clusterDef     *appsv1alpha1.ClusterDefinition
-			clusterVersion *appsv1alpha1.ClusterVersion
-			cluster        *appsv1alpha1.Cluster
+			compDef *appsv1.ComponentDefinition
+			cluster *appsv1.Cluster
 		)
 
 		BeforeEach(func() {
-			clusterDef = testapps.NewClusterDefFactory(clusterDefName).
-				AddComponentDef(testapps.StatefulMySQLComponent, mysqlCompDefName).
-				AddComponentDef(testapps.StatelessNginxComponent, proxyCompDefName).
+			compDef = testapps.NewComponentDefinitionFactory(compDefName).
+				SetDefaultSpec().
 				GetObject()
-			clusterVersion = testapps.NewClusterVersionFactory(clusterVersionName, clusterDefName).
-				AddComponentVersion(mysqlCompDefName).
-				AddContainerShort("mysql", testapps.ApeCloudMySQLImage).
-				AddComponentVersion(proxyCompDefName).
-				AddInitContainerShort("nginx-init", testapps.NginxImage).
-				AddContainerShort("nginx", testapps.NginxImage).
+			cluster = testapps.NewClusterFactory(testCtx.DefaultNamespace, clusterName, "").
+				AddComponent(mysqlCompName, compDef.GetName()).
+				AddVolumeClaimTemplate(testapps.DataVolumeName, testapps.NewPVCSpec("1Gi")).
 				GetObject()
-			pvcSpec := testapps.NewPVCSpec("1Gi")
-			cluster = testapps.NewClusterFactory(testCtx.DefaultNamespace, clusterName, clusterDef.Name, clusterVersion.Name).
-				AddComponent(mysqlCompName, mysqlCompDefName).
-				AddVolumeClaimTemplate(testapps.DataVolumeName, pvcSpec).
-				AddComponent(proxyCompName, proxyCompDefName).
-				AddVolumeClaimTemplate(testapps.DataVolumeName, pvcSpec).
-				GetObject()
+
 		})
 
-		It("should work as expected with various inputs", func() {
-			By("assign every available fields")
-			reqCtx := intctrlutil.RequestCtx{
-				Ctx: ctx,
-				Log: logger,
-			}
-			component, err := BuildSynthesizedComponentWrapper4Test(reqCtx, testCtx.Cli, clusterDef, clusterVersion, cluster, &cluster.Spec.ComponentSpecs[0])
+		compObj := func() *appsv1.Component {
+			comp, err := BuildComponent(cluster, &cluster.Spec.ComponentSpecs[0], nil, nil)
 			Expect(err).Should(Succeed())
-			Expect(component).ShouldNot(BeNil())
-
-			By("leave clusterVersion.versionCtx empty initContains and containers")
-			clusterVersion.Spec.ComponentVersions[0].VersionsCtx.Containers = nil
-			clusterVersion.Spec.ComponentVersions[0].VersionsCtx.InitContainers = nil
-			component, err = BuildSynthesizedComponentWrapper4Test(reqCtx, testCtx.Cli, clusterDef, clusterVersion, cluster, &cluster.Spec.ComponentSpecs[0])
-			Expect(err).Should(Succeed())
-			Expect(component).ShouldNot(BeNil())
-
-			By("new container in clusterVersion not in clusterDefinition")
-			component, err = BuildSynthesizedComponentWrapper4Test(reqCtx, testCtx.Cli, clusterDef, clusterVersion, cluster, &cluster.Spec.ComponentSpecs[0])
-			Expect(err).Should(Succeed())
-			Expect(len(component.PodSpec.Containers) >= 3).Should(BeTrue())
-
-			By("new init container in clusterVersion not in clusterDefinition")
-			component, err = BuildSynthesizedComponentWrapper4Test(reqCtx, testCtx.Cli, clusterDef, clusterVersion, cluster, &cluster.Spec.ComponentSpecs[1])
-			Expect(err).Should(Succeed())
-			Expect(len(component.PodSpec.InitContainers)).Should(Equal(1))
-		})
-
-		It("should auto fill first component if it's empty", func() {
-			reqCtx := intctrlutil.RequestCtx{
-				Ctx: ctx,
-				Log: logger,
-			}
-
-			By("fill simplified fields")
-			r := int32(3)
-			cluster.Spec.Replicas = &r
-			cluster.Spec.Resources.CPU = resource.MustParse("1000m")
-			cluster.Spec.Resources.Memory = resource.MustParse("2Gi")
-			cluster.Spec.Storage.Size = resource.MustParse("20Gi")
-
-			By("clear cluster's component spec")
-			cluster.Spec.ComponentSpecs = nil
-
-			By("build first component from simplified fields")
-			synthesizeComp, err := BuildSynthesizedComponentWrapper4Test(reqCtx, testCtx.Cli, clusterDef, clusterVersion, cluster, nil)
-			Expect(err).Should(Succeed())
-			Expect(synthesizeComp).ShouldNot(BeNil())
-			Expect(synthesizeComp.Replicas).Should(Equal(*cluster.Spec.Replicas))
-			Expect(synthesizeComp.VolumeClaimTemplates[0].Spec.Resources.Requests["storage"]).Should(Equal(cluster.Spec.Storage.Size))
-
-			// By("build second component will be nil")
-			// synthesizeComp, err = BuildSynthesizedComponentWrapper4Test(reqCtx, testCtx.Cli, clusterDef, clusterVersion, cluster, nil)
-			// Expect(err).Should(Succeed())
-			// Expect(synthesizeComp).Should(BeNil())
-		})
-
-		It("build affinity correctly", func() {
-			reqCtx := intctrlutil.RequestCtx{
-				Ctx: ctx,
-				Log: logger,
-			}
-			By("fill affinity")
-			cluster.Spec.AvailabilityPolicy = appsv1alpha1.AvailabilityPolicyZone
-			cluster.Spec.Tenancy = appsv1alpha1.DedicatedNode
-			By("clear cluster's component spec")
-			cluster.Spec.ComponentSpecs = nil
-			By("call build")
-			synthesizeComp, err := BuildSynthesizedComponentWrapper4Test(reqCtx, testCtx.Cli, clusterDef, clusterVersion, cluster, nil)
-			Expect(err).Should(Succeed())
-			Expect(synthesizeComp).ShouldNot(BeNil())
-			Expect(synthesizeComp.PodSpec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution[0].PodAffinityTerm.TopologyKey).Should(Equal("topology.kubernetes.io/zone"))
-			Expect(synthesizeComp.PodSpec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution[0].TopologyKey).Should(Equal("kubernetes.io/hostname"))
-		})
-
-		It("build monitor correctly", func() {
-			reqCtx := intctrlutil.RequestCtx{
-				Ctx: ctx,
-				Log: logger,
-			}
-			By("enable monitor config in clusterdefinition")
-			clusterDef.Spec.ComponentDefs[0].Monitor = &appsv1alpha1.MonitorConfig{
-				BuiltIn: true,
-			}
-			By("fill monitor")
-			interval := intstr.Parse("0")
-			cluster.Spec.Monitor.MonitoringInterval = &interval
-			By("clear cluster's component spec")
-			cluster.Spec.ComponentSpecs = nil
-			By("call build")
-			synthesizeComp, err := BuildSynthesizedComponentWrapper4Test(reqCtx, testCtx.Cli, clusterDef, clusterVersion, cluster, nil)
-			Expect(err).Should(Succeed())
-			Expect(synthesizeComp).ShouldNot(BeNil())
-			Expect(synthesizeComp.Monitor.Enable).Should(Equal(false))
-			By("set monitor interval to 10s")
-			interval2 := intstr.Parse("10s")
-			cluster.Spec.Monitor.MonitoringInterval = &interval2
-			By("call build")
-			synthesizeComp, err = BuildSynthesizedComponentWrapper4Test(reqCtx, testCtx.Cli, clusterDef, clusterVersion, cluster, nil)
-			Expect(err).Should(Succeed())
-			Expect(synthesizeComp).ShouldNot(BeNil())
-			Expect(synthesizeComp.Monitor.Enable).Should(Equal(true))
-		})
-
-		It("build network correctly", func() {
-			reqCtx := intctrlutil.RequestCtx{
-				Ctx: ctx,
-				Log: logger,
-			}
-			By("setup cloud provider")
-			viper.Set(constant.CfgKeyServerInfo, "v1.26.5-gke.1200")
-			By("fill network")
-			cluster.Spec.Network = &appsv1alpha1.ClusterNetwork{
-				HostNetworkAccessible: true,
-				PubliclyAccessible:    false,
-			}
-			By("clear cluster's component spec")
-			cluster.Spec.ComponentSpecs = nil
-			By("call build")
-			synthesizeComp, err := BuildSynthesizedComponentWrapper4Test(reqCtx, testCtx.Cli, clusterDef, clusterVersion, cluster, nil)
-			Expect(err).Should(Succeed())
-			Expect(synthesizeComp).ShouldNot(BeNil())
-			Expect(synthesizeComp.Services[1].Name).Should(Equal("vpc"))
-			Expect(synthesizeComp.Services[1].Annotations["networking.gke.io/load-balancer-type"]).Should(Equal("Internal"))
-			Expect(synthesizeComp.Services[1].Spec.Type).Should(BeEquivalentTo("LoadBalancer"))
-		})
-
-		It("Test replace secretRef env placeholder token", func() {
-			By("mock connect credential and do replace placeholder token")
-			credentialMap := GetEnvReplacementMapForConnCredential(cluster.Name)
-			mockEnvs := []corev1.EnvVar{
-				{
-					Name: mysqlSecretUserEnvName,
-					ValueFrom: &corev1.EnvVarSource{
-						SecretKeyRef: &corev1.SecretKeySelector{
-							Key: "username",
-							LocalObjectReference: corev1.LocalObjectReference{
-								Name: constant.KBConnCredentialPlaceHolder,
-							},
-						},
-					},
-				},
-				{
-					Name: mysqlSecretPasswdEnvName,
-					ValueFrom: &corev1.EnvVarSource{
-						SecretKeyRef: &corev1.SecretKeySelector{
-							Key: "password",
-							LocalObjectReference: corev1.LocalObjectReference{
-								Name: constant.KBConnCredentialPlaceHolder,
-							},
-						},
-					},
-				},
-			}
-			mockEnvs = ReplaceSecretEnvVars(credentialMap, mockEnvs)
-			Expect(len(mockEnvs)).Should(Equal(2))
-			for _, env := range mockEnvs {
-				Expect(env.ValueFrom).ShouldNot(BeNil())
-				Expect(env.ValueFrom.SecretKeyRef).ShouldNot(BeNil())
-				Expect(env.ValueFrom.SecretKeyRef.Name).Should(Equal(constant.GenerateDefaultConnCredential(cluster.Name)))
-			}
-		})
-
-		It("should not fill component if none of simplified api is present", func() {
-			reqCtx := intctrlutil.RequestCtx{
-				Ctx: ctx,
-				Log: logger,
-			}
-			By("clear cluster's component spec")
-			cluster.Spec.ComponentSpecs = nil
-			By("call build")
-			synthesizeComp, err := BuildSynthesizedComponentWrapper4Test(reqCtx, testCtx.Cli, clusterDef, clusterVersion, cluster, nil)
-			Expect(err).Should(Succeed())
-			Expect(synthesizeComp).Should(BeNil())
-		})
+			return comp
+		}
 
 		PIt("build serviceReference correctly", func() {
-			reqCtx := intctrlutil.RequestCtx{
-				Ctx: ctx,
-				Log: logger,
-			}
 			const (
 				name    = "nginx"
 				ns      = "default"
@@ -268,21 +73,21 @@ var _ = Describe("Component", func() {
 				version = "mock-version"
 			)
 			By("generate serviceReference")
-			serviceDescriptor := &appsv1alpha1.ServiceDescriptor{
+			serviceDescriptor := &appsv1.ServiceDescriptor{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      name,
 					Namespace: ns,
 				},
-				Spec: appsv1alpha1.ServiceDescriptorSpec{
+				Spec: appsv1.ServiceDescriptorSpec{
 					ServiceKind:    kind,
 					ServiceVersion: version,
 				},
 			}
-			serviceReferenceMap := map[string]*appsv1alpha1.ServiceDescriptor{
+			serviceReferenceMap := map[string]*appsv1.ServiceDescriptor{
 				testapps.NginxImage: serviceDescriptor,
 			}
 			By("call build")
-			synthesizeComp, err := BuildSynthesizedComponentWrapper4Test(reqCtx, testCtx.Cli, clusterDef, clusterVersion, cluster, &cluster.Spec.ComponentSpecs[0])
+			synthesizeComp, err := BuildSynthesizedComponent(ctx, testCtx.Cli, compDef, compObj(), cluster)
 			Expect(err).Should(Succeed())
 			Expect(synthesizeComp).ShouldNot(BeNil())
 			Expect(synthesizeComp.ServiceReferences).ShouldNot(BeNil())
@@ -298,47 +103,43 @@ var _ = Describe("Component", func() {
 				_512m  = resource.MustParse("512Mi")
 				_1024m = resource.MustParse("1Gi")
 				_2048m = resource.MustParse("2Gi")
-				reqCtx = intctrlutil.RequestCtx{Ctx: ctx, Log: logger}
 			)
-			for i := range clusterDef.Spec.ComponentDefs {
-				compDef := &clusterDef.Spec.ComponentDefs[i]
-				compDef.PodSpec.Volumes = append(compDef.PodSpec.Volumes, []corev1.Volume{
-					{
-						Name: "shmd-ok",
-						VolumeSource: corev1.VolumeSource{
-							EmptyDir: &corev1.EmptyDirVolumeSource{
-								Medium: corev1.StorageMediumMemory,
-							},
+			compDef.Spec.Runtime.Volumes = append(compDef.Spec.Runtime.Volumes, []corev1.Volume{
+				{
+					Name: "shmd-ok",
+					VolumeSource: corev1.VolumeSource{
+						EmptyDir: &corev1.EmptyDirVolumeSource{
+							Medium: corev1.StorageMediumMemory,
 						},
 					},
-					{
-						Name: "shmd-medium",
-						VolumeSource: corev1.VolumeSource{
-							EmptyDir: &corev1.EmptyDirVolumeSource{
-								Medium: corev1.StorageMediumDefault,
-							},
+				},
+				{
+					Name: "shmd-medium",
+					VolumeSource: corev1.VolumeSource{
+						EmptyDir: &corev1.EmptyDirVolumeSource{
+							Medium: corev1.StorageMediumDefault,
 						},
 					},
-					{
-						Name: "shmd-size-small",
-						VolumeSource: corev1.VolumeSource{
-							EmptyDir: &corev1.EmptyDirVolumeSource{
-								Medium:    corev1.StorageMediumMemory,
-								SizeLimit: &_128m,
-							},
+				},
+				{
+					Name: "shmd-size-small",
+					VolumeSource: corev1.VolumeSource{
+						EmptyDir: &corev1.EmptyDirVolumeSource{
+							Medium:    corev1.StorageMediumMemory,
+							SizeLimit: &_128m,
 						},
 					},
-					{
-						Name: "shmd-size-large",
-						VolumeSource: corev1.VolumeSource{
-							EmptyDir: &corev1.EmptyDirVolumeSource{
-								Medium:    corev1.StorageMediumMemory,
-								SizeLimit: &_2048m,
-							},
+				},
+				{
+					Name: "shmd-size-large",
+					VolumeSource: corev1.VolumeSource{
+						EmptyDir: &corev1.EmptyDirVolumeSource{
+							Medium:    corev1.StorageMediumMemory,
+							SizeLimit: &_2048m,
 						},
 					},
-				}...)
-			}
+				},
+			}...)
 
 			By("with memory resource set")
 			if cluster.Spec.ComponentSpecs[0].Resources.Requests == nil {
@@ -349,7 +150,7 @@ var _ = Describe("Component", func() {
 			}
 			cluster.Spec.ComponentSpecs[0].Resources.Requests[corev1.ResourceMemory] = _512m
 			cluster.Spec.ComponentSpecs[0].Resources.Limits[corev1.ResourceMemory] = _1024m
-			comp, err := BuildSynthesizedComponentWrapper4Test(reqCtx, testCtx.Cli, clusterDef, nil, cluster, &cluster.Spec.ComponentSpecs[0])
+			comp, err := BuildSynthesizedComponent(ctx, testCtx.Cli, compDef.DeepCopy(), compObj(), cluster)
 			Expect(err).Should(Succeed())
 			Expect(comp).ShouldNot(BeNil())
 			for _, vol := range comp.PodSpec.Volumes {
@@ -370,7 +171,7 @@ var _ = Describe("Component", func() {
 			By("without memory resource set")
 			delete(cluster.Spec.ComponentSpecs[0].Resources.Requests, corev1.ResourceMemory)
 			delete(cluster.Spec.ComponentSpecs[0].Resources.Limits, corev1.ResourceMemory)
-			comp, err = BuildSynthesizedComponentWrapper4Test(reqCtx, testCtx.Cli, clusterDef, nil, cluster, &cluster.Spec.ComponentSpecs[0])
+			comp, err = BuildSynthesizedComponent(ctx, testCtx.Cli, compDef.DeepCopy(), compObj(), cluster)
 			Expect(err).Should(Succeed())
 			Expect(comp).ShouldNot(BeNil())
 			for _, vol := range comp.PodSpec.Volumes {
@@ -399,7 +200,7 @@ func TestGetConfigSpecByName(t *testing.T) {
 	tests := []struct {
 		name string
 		args args
-		want *appsv1alpha1.ComponentConfigSpec
+		want *appsv1.ComponentConfigSpec
 	}{{
 		name: "test",
 		args: args{
@@ -411,8 +212,8 @@ func TestGetConfigSpecByName(t *testing.T) {
 		name: "test",
 		args: args{
 			component: &SynthesizedComponent{
-				ConfigTemplates: []appsv1alpha1.ComponentConfigSpec{{
-					ComponentTemplateSpec: appsv1alpha1.ComponentTemplateSpec{
+				ConfigTemplates: []appsv1.ComponentConfigSpec{{
+					ComponentTemplateSpec: appsv1.ComponentTemplateSpec{
 						Name: "test",
 					}}},
 			},
@@ -423,15 +224,15 @@ func TestGetConfigSpecByName(t *testing.T) {
 		name: "test",
 		args: args{
 			component: &SynthesizedComponent{
-				ConfigTemplates: []appsv1alpha1.ComponentConfigSpec{{
-					ComponentTemplateSpec: appsv1alpha1.ComponentTemplateSpec{
+				ConfigTemplates: []appsv1.ComponentConfigSpec{{
+					ComponentTemplateSpec: appsv1.ComponentTemplateSpec{
 						Name: "for-test",
 					}}},
 			},
 			configSpec: "for-test",
 		},
-		want: &appsv1alpha1.ComponentConfigSpec{
-			ComponentTemplateSpec: appsv1alpha1.ComponentTemplateSpec{
+		want: &appsv1.ComponentConfigSpec{
+			ComponentTemplateSpec: appsv1.ComponentTemplateSpec{
 				Name: "for-test",
 			}},
 	}}

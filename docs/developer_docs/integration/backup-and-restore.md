@@ -280,7 +280,7 @@ Therefore, although a new root account and password are created when restoring a
 
 ## Reference
 
-- For more details on the backup and restore function of KubeBlocks, refer to [Backup and Restore](./../../user_docs/backup-and-restore/introduction.md).
+- For more details on the backup and restore function of KubeBlocks, refer to [Backup and Restore](./../../user_docs/maintenance/backup-and-restore/introduction.md).
 
 ## Appendix
 
@@ -294,13 +294,13 @@ KubeBlocks provides various data protection policies for stateful clusters, each
 
 :::note
 
-Refer to the data protection policies of KubeBlocks via [Termination Policy](./../../user_docs/kubeblocks-for-mysql/cluster-management/delete-mysql-cluster.md#termination-policy).
+Refer to the data protection policies of KubeBlocks via [Termination Policy](./../../user_docs/kubeblocks-for-apecloud-mysql/cluster-management/delete-mysql-cluster.md#termination-policy).
 
 :::
 
 ### A.2 Monitor backup progress
 
-In [Step 4](#step-4-how-to-back-uprestore-a-cluster), you have created a backup using the backup subcommand.
+In [Step 4](#step-4-back-up-and-restore-a-cluster), you have created a backup using the backup subcommand.
 
 ```bash
 kbcli cluster backup mycluster  --type snapshot

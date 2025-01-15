@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -32,7 +32,6 @@ import (
 
 	cfgcore "github.com/apecloud/kubeblocks/pkg/configuration/core"
 	cfgutil "github.com/apecloud/kubeblocks/pkg/configuration/util"
-	types2 "github.com/apecloud/kubeblocks/pkg/controller/client"
 )
 
 const (
@@ -70,7 +69,7 @@ type TplEngine struct {
 	importModules *set.LinkedHashSetString
 	importFuncs   map[string]functional
 
-	cli types2.ReadonlyClient
+	cli client.Reader
 	ctx context.Context
 }
 

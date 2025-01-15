@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -25,6 +25,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/pointer"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	dpv1alpha1 "github.com/apecloud/kubeblocks/apis/dataprotection/v1alpha1"
@@ -39,13 +40,13 @@ import (
 )
 
 const (
-	BackupDataJobNamePrefix      = "dp-backup"
-	prebackupJobNamePrefix       = "dp-prebackup"
-	postbackupJobNamePrefix      = "dp-postbackup"
-	BackupDataContainerName      = "backupdata"
-	SyncProgressContainerName    = "sync-progress"
-	SyncProgressSharedVolumeName = "sync-progress-shared-volume"
-	SyncProgressSharedMountPath  = "/dp-sync-progress"
+	BackupDataJobNamePrefix = "dp-backup"
+	prebackupJobNamePrefix  = "dp-prebackup"
+	postbackupJobNamePrefix = "dp-postbackup"
+	BackupDataContainerName = "backupdata"
+	managerContainerName    = "manager"
+	managerSharedVolumeName = "manager-shared-volume"
+	managerSharedMountPath  = "/dp-manager"
 )
 
 // Request is a request for a backup, with all references to other objects.
@@ -53,14 +54,19 @@ type Request struct {
 	*dpv1alpha1.Backup
 	intctrlutil.RequestCtx
 
-	Client           client.Client
-	BackupPolicy     *dpv1alpha1.BackupPolicy
-	BackupMethod     *dpv1alpha1.BackupMethod
-	ActionSet        *dpv1alpha1.ActionSet
-	TargetPods       []*corev1.Pod
-	BackupRepoPVC    *corev1.PersistentVolumeClaim
-	BackupRepo       *dpv1alpha1.BackupRepo
-	ToolConfigSecret *corev1.Secret
+	Client               client.Client
+	BackupPolicy         *dpv1alpha1.BackupPolicy
+	BackupMethod         *dpv1alpha1.BackupMethod
+	ActionSet            *dpv1alpha1.ActionSet
+	TargetPods           []*corev1.Pod
+	BackupRepoPVC        *corev1.PersistentVolumeClaim
+	BackupRepo           *dpv1alpha1.BackupRepo
+	ToolConfigSecret     *corev1.Secret
+	WorkerServiceAccount string
+	SnapshotVolumes      bool
+	Target               *dpv1alpha1.BackupTarget
+	ParentBackup         *dpv1alpha1.Backup
+	BaseBackup           *dpv1alpha1.Backup
 }
 
 func (r *Request) GetBackupType() string {
@@ -74,118 +80,134 @@ func (r *Request) GetBackupType() string {
 }
 
 // BuildActions builds the actions for the backup.
-func (r *Request) BuildActions() ([]action.Action, error) {
-	var actions []action.Action
+func (r *Request) BuildActions() (map[string][]action.Action, error) {
+	var actions = map[string][]action.Action{}
 
-	appendIgnoreNil := func(elems ...action.Action) {
+	appendIgnoreNil := func(podActions []action.Action, elems ...action.Action) []action.Action {
 		for _, elem := range elems {
 			if elem == nil || reflect.ValueOf(elem).IsNil() {
 				continue
 			}
-			actions = append(actions, elem)
+			podActions = append(podActions, elem)
 		}
+		return podActions
 	}
 
-	// build pre-backup actions
-	preBackupActions, err := r.buildPreBackupActions()
-	if err != nil {
-		return nil, err
+	for i := range r.TargetPods {
+		var podActions []action.Action
+
+		// 1. build pre-backup actions
+		if err := r.buildPreBackupActions(&podActions, r.TargetPods[i], i); err != nil {
+			return nil, err
+		}
+
+		// 2. build backup data action
+		backupDataAction, err := r.buildBackupDataAction(r.TargetPods[i], fmt.Sprintf("%s-%s%d", BackupDataJobNamePrefix, r.getActionTargetPrefix(), i))
+		if err != nil {
+			return nil, err
+		}
+		podActions = appendIgnoreNil(podActions, backupDataAction)
+
+		// 3. build create volume snapshot action
+		createVolumeSnapshotAction, err := r.buildCreateVolumeSnapshotAction(r.TargetPods[i], fmt.Sprintf("createVolumeSnapshot-%s%d", r.getActionTargetPrefix(), i), i)
+		if err != nil {
+			return nil, err
+		}
+		podActions = appendIgnoreNil(podActions, createVolumeSnapshotAction)
+
+		// 4. build post-backup actions
+		if err = r.buildPostBackupActions(&podActions, r.TargetPods[i], i); err != nil {
+			return nil, err
+		}
+		actions[r.TargetPods[i].Name] = podActions
 	}
 
-	// build backup data action
-	backupDataAction, err := r.buildBackupDataAction()
-	if err != nil {
-		return nil, err
-	}
-
-	// build create volume snapshot action
-	createVolumeSnapshotAction, err := r.buildCreateVolumeSnapshotAction()
-	if err != nil {
-		return nil, err
-	}
-
-	// build backup kubernetes resources action
-	backupKubeResourcesAction, err := r.buildBackupKubeResourcesAction()
-	if err != nil {
-		return nil, err
-	}
-
-	// build post-backup actions
-	postBackupActions, err := r.buildPostBackupActions()
-	if err != nil {
-		return nil, err
-	}
-
-	appendIgnoreNil(preBackupActions...)
-	appendIgnoreNil(backupDataAction, createVolumeSnapshotAction, backupKubeResourcesAction)
-	appendIgnoreNil(postBackupActions...)
+	// TODO: build backup kubernetes resources action
 	return actions, nil
 }
 
-func (r *Request) buildPreBackupActions() ([]action.Action, error) {
+func (r *Request) getActionTargetPrefix() string {
+	if r.Target != nil && r.Target.Name != "" {
+		return r.Target.Name + "-"
+	}
+	return ""
+}
+
+func (r *Request) buildPreBackupActions(podActions *[]action.Action, targetPod *corev1.Pod, index int) error {
 	if !r.backupActionSetExists() ||
 		len(r.ActionSet.Spec.Backup.PreBackup) == 0 {
-		return nil, nil
+		return nil
 	}
-
-	var actions []action.Action
 	for i, preBackup := range r.ActionSet.Spec.Backup.PreBackup {
-		a, err := r.buildAction(fmt.Sprintf("%s-%d", prebackupJobNamePrefix, i), &preBackup)
+		a, err := r.buildAction(targetPod, fmt.Sprintf("%s-%s%d-%d", prebackupJobNamePrefix, r.getActionTargetPrefix(), i, index), &preBackup)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		actions = append(actions, a)
+		*podActions = append(*podActions, a)
 	}
-	return actions, nil
+	return nil
 }
 
-func (r *Request) buildPostBackupActions() ([]action.Action, error) {
+func (r *Request) buildPostBackupActions(podActions *[]action.Action, targetPod *corev1.Pod, index int) error {
 	if !r.backupActionSetExists() ||
 		len(r.ActionSet.Spec.Backup.PostBackup) == 0 {
-		return nil, nil
+		return nil
 	}
 
-	var actions []action.Action
 	for i, postBackup := range r.ActionSet.Spec.Backup.PostBackup {
-		a, err := r.buildAction(fmt.Sprintf("%s-%d", postbackupJobNamePrefix, i), &postBackup)
+		a, err := r.buildAction(targetPod, fmt.Sprintf("%s-%s%d-%d", postbackupJobNamePrefix, r.getActionTargetPrefix(), i, index), &postBackup)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		actions = append(actions, a)
+		*podActions = append(*podActions, a)
 	}
-	return actions, nil
+	return nil
 }
 
-func (r *Request) buildBackupDataAction() (action.Action, error) {
+func (r *Request) buildBackupDataAction(targetPod *corev1.Pod, name string) (action.Action, error) {
 	if !r.backupActionSetExists() ||
 		r.ActionSet.Spec.Backup.BackupData == nil {
 		return nil, nil
 	}
 
 	backupDataAct := r.ActionSet.Spec.Backup.BackupData
-	podSpec, err := r.BuildJobActionPodSpec(BackupDataContainerName, &backupDataAct.JobActionSpec)
-	if err != nil {
-		return nil, fmt.Errorf("failed to build job action pod spec: %w", err)
-	}
-
-	if backupDataAct.SyncProgress != nil {
-		r.InjectSyncProgressContainer(podSpec, backupDataAct.SyncProgress, r.buildSyncProgressCommand())
-	}
-
-	if r.ActionSet.Spec.BackupType == dpv1alpha1.BackupTypeFull {
+	switch r.ActionSet.Spec.BackupType {
+	case dpv1alpha1.BackupTypeFull, dpv1alpha1.BackupTypeIncremental, dpv1alpha1.BackupTypeSelective:
+		podSpec, err := r.BuildJobActionPodSpec(targetPod, BackupDataContainerName, &backupDataAct.JobActionSpec)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build job action pod spec: %w", err)
+		}
+		r.InjectManagerContainer(podSpec, backupDataAct.SyncProgress, r.buildSyncProgressCommand())
 		return &action.JobAction{
-			Name:         BackupDataJobNamePrefix,
-			ObjectMeta:   *buildBackupJobObjMeta(r.Backup, BackupDataJobNamePrefix),
+			Name:         name,
+			ObjectMeta:   *buildBackupJobObjMeta(r.Backup, name),
 			Owner:        r.Backup,
 			PodSpec:      podSpec,
 			BackOffLimit: r.BackupPolicy.Spec.BackoffLimit,
+		}, nil
+	case dpv1alpha1.BackupTypeContinuous:
+		podSpec, err := r.BuildJobActionPodSpec(r.TargetPods[0], BackupDataContainerName, &backupDataAct.JobActionSpec)
+		if err != nil {
+			return nil, err
+		}
+		r.InjectManagerContainer(podSpec, backupDataAct.SyncProgress, r.buildContinuousSyncProgressCommand())
+		return &action.StatefulSetAction{
+			Name: name,
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: r.Namespace,
+				Name:      GenerateBackupStatefulSetName(r.Backup, r.Target.Name, BackupDataJobNamePrefix),
+				Labels:    BuildBackupWorkloadLabels(r.Backup),
+			},
+			Replicas:  pointer.Int32(int32(1)),
+			Backup:    r.Backup,
+			PodSpec:   podSpec,
+			ActionSet: r.ActionSet,
 		}, nil
 	}
 	return nil, fmt.Errorf("unsupported backup type %s", r.ActionSet.Spec.BackupType)
 }
 
-func (r *Request) buildCreateVolumeSnapshotAction() (action.Action, error) {
-	targetPod := r.TargetPods[0]
+func (r *Request) buildCreateVolumeSnapshotAction(targetPod *corev1.Pod, name string, index int) (action.Action, error) {
 	if r.BackupMethod == nil ||
 		!boolptr.IsSetToTrue(r.BackupMethod.SnapshotVolumes) {
 		return nil, nil
@@ -211,7 +233,10 @@ func (r *Request) buildCreateVolumeSnapshotAction() (action.Action, error) {
 	}
 
 	return &action.CreateVolumeSnapshotAction{
-		Name: "createVolumeSnapshot",
+		Name:          name,
+		Index:         index,
+		TargetPodName: targetPod.Name,
+		TargetName:    r.Target.Name,
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: r.Backup.Namespace,
 			Name:      r.Backup.Name,
@@ -222,12 +247,9 @@ func (r *Request) buildCreateVolumeSnapshotAction() (action.Action, error) {
 	}, nil
 }
 
-// TODO(ldm): implement this
-func (r *Request) buildBackupKubeResourcesAction() (action.Action, error) {
-	return nil, nil
-}
-
-func (r *Request) buildAction(name string, act *dpv1alpha1.ActionSpec) (action.Action, error) {
+func (r *Request) buildAction(targetPod *corev1.Pod,
+	name string,
+	act *dpv1alpha1.ActionSpec) (action.Action, error) {
 	if act.Exec == nil && act.Job == nil {
 		return nil, fmt.Errorf("action %s has no exec or job", name)
 	}
@@ -236,15 +258,16 @@ func (r *Request) buildAction(name string, act *dpv1alpha1.ActionSpec) (action.A
 	}
 	switch {
 	case act.Exec != nil:
-		return r.buildExecAction(name, act.Exec), nil
+		return r.buildExecAction(targetPod, name, act.Exec), nil
 	case act.Job != nil:
-		return r.buildJobAction(name, act.Job)
+		return r.buildJobAction(targetPod, name, act.Job)
 	}
 	return nil, nil
 }
 
-func (r *Request) buildExecAction(name string, exec *dpv1alpha1.ExecActionSpec) action.Action {
-	targetPod := r.TargetPods[0]
+func (r *Request) buildExecAction(targetPod *corev1.Pod,
+	name string,
+	exec *dpv1alpha1.ExecActionSpec) action.Action {
 	objectMeta := *buildBackupJobObjMeta(r.Backup, name)
 	objectMeta.Labels[dptypes.BackupNamespaceLabelKey] = r.Namespace
 	// create exec job in kubeblocks namespace for security
@@ -259,18 +282,19 @@ func (r *Request) buildExecAction(name string, exec *dpv1alpha1.ExecActionSpec) 
 			ObjectMeta: objectMeta,
 			Owner:      r.Backup,
 		},
-		Command:   exec.Command,
-		Container: containerName,
-		Namespace: targetPod.Namespace,
-		PodName:   targetPod.Name,
-		Timeout:   exec.Timeout,
-		// use the kubeblocks's serviceAccount
-		ServiceAccountName: viper.GetString(constant.KBServiceAccountName),
+		Command:            exec.Command,
+		Container:          containerName,
+		Namespace:          targetPod.Namespace,
+		PodName:            targetPod.Name,
+		Timeout:            exec.Timeout,
+		ServiceAccountName: viper.GetString(dptypes.CfgKeyExecWorkerServiceAccountName),
 	}
 }
 
-func (r *Request) buildJobAction(name string, job *dpv1alpha1.JobActionSpec) (action.Action, error) {
-	podSpec, err := r.BuildJobActionPodSpec(name, job)
+func (r *Request) buildJobAction(targetPod *corev1.Pod,
+	name string,
+	job *dpv1alpha1.JobActionSpec) (action.Action, error) {
+	podSpec, err := r.BuildJobActionPodSpec(targetPod, name, job)
 	if err != nil {
 		return nil, err
 	}
@@ -283,15 +307,16 @@ func (r *Request) buildJobAction(name string, job *dpv1alpha1.JobActionSpec) (ac
 	}, nil
 }
 
-func (r *Request) BuildJobActionPodSpec(name string,
+func (r *Request) BuildJobActionPodSpec(targetPod *corev1.Pod,
+	name string,
 	job *dpv1alpha1.JobActionSpec) (*corev1.PodSpec, error) {
-	targetPod := r.TargetPods[0]
 
 	// build environment variables, include built-in envs, envs from backupMethod
 	// and envs from actionSet. Latter will override former for the same name.
 	// env from backupMethod has the highest priority.
-	buildEnv := func() []corev1.EnvVar {
-		envVars := []corev1.EnvVar{
+	buildEnv := func() ([]corev1.EnvVar, error) {
+		envVars := targetPod.Spec.Containers[0].Env
+		envVars = append(envVars, []corev1.EnvVar{
 			{
 				Name:  dptypes.DPBackupName,
 				Value: r.Backup.Name,
@@ -301,23 +326,64 @@ func (r *Request) BuildJobActionPodSpec(name string,
 				Value: targetPod.Name,
 			},
 			{
-				Name:  dptypes.DPBackupBasePath,
-				Value: BuildBackupPath(r.Backup, r.BackupPolicy.Spec.PathPrefix),
+				Name:  dptypes.DPTargetPodRole,
+				Value: targetPod.Labels[constant.RoleLabelKey],
+			},
+			{
+				Name: dptypes.DPBackupBasePath,
+				Value: BuildBackupPathByTarget(r.Backup, r.Target,
+					r.BackupRepo.Spec.PathPrefix, r.BackupPolicy.Spec.PathPrefix, targetPod.Name),
 			},
 			{
 				Name:  dptypes.DPBackupInfoFile,
-				Value: SyncProgressSharedMountPath + "/" + BackupInfoFileName,
+				Value: managerSharedMountPath + "/" + BackupInfoFileName,
 			},
 			{
 				Name:  dptypes.DPTTL,
 				Value: r.Spec.RetentionPeriod.String(),
 			},
+		}...)
+		envFromTarget, err := utils.BuildEnvByTarget(targetPod, r.Target.ConnectionCredential, r.Target.ContainerPort)
+		if err != nil {
+			return nil, err
 		}
-		envVars = append(envVars, utils.BuildEnvByCredential(targetPod, r.BackupPolicy.Spec.Target.ConnectionCredential)...)
+		envVars = append(envVars, envFromTarget...)
 		if r.ActionSet != nil {
 			envVars = append(envVars, r.ActionSet.Spec.Env...)
+			envVars = append(envVars, utils.BuildEnvByParameters(r.Backup.Spec.Parameters)...)
 		}
-		return utils.MergeEnv(envVars, r.BackupMethod.Env)
+		// build envs for kb cluster
+		setKBClusterEnv := func(labelKey, envName string) {
+			if v, ok := r.Backup.Labels[labelKey]; ok {
+				envVars = append(envVars, corev1.EnvVar{Name: envName, Value: v})
+			}
+		}
+		setKBClusterEnv(dptypes.ClusterUIDLabelKey, constant.KBEnvClusterUID)
+		setKBClusterEnv(constant.AppInstanceLabelKey, constant.KBEnvClusterName)
+		setKBClusterEnv(constant.KBAppComponentLabelKey, constant.KBEnvCompName)
+		envVars = append(envVars, corev1.EnvVar{Name: constant.KBEnvNamespace, Value: r.Namespace})
+		if r.ParentBackup != nil && r.BaseBackup != nil {
+			// build envs for incremental backups
+			envVars = append(envVars, []corev1.EnvVar{
+				{
+					Name:  dptypes.DPParentBackupName,
+					Value: r.ParentBackup.Name,
+				},
+				{
+					Name:  dptypes.DPBaseBackupName,
+					Value: r.BaseBackup.Name,
+				},
+				{
+					Name:  dptypes.DPTargetRelativePath,
+					Value: BuildTargetRelativePath(r.Target, targetPod.Name),
+				},
+				{
+					Name:  dptypes.DPBackupRootPath,
+					Value: BuildBackupRootPath(r.Backup, r.BackupRepo.Spec.PathPrefix, r.BackupPolicy.Spec.PathPrefix),
+				},
+			}...)
+		}
+		return utils.MergeEnv(envVars, r.BackupMethod.Env), nil
 	}
 
 	runOnTargetPodNode := func() bool {
@@ -327,7 +393,7 @@ func (r *Request) BuildJobActionPodSpec(name string,
 	buildVolumes := func() []corev1.Volume {
 		volumes := []corev1.Volume{
 			{
-				Name: SyncProgressSharedVolumeName,
+				Name: managerSharedVolumeName,
 				VolumeSource: corev1.VolumeSource{
 					EmptyDir: &corev1.EmptyDirVolumeSource{},
 				},
@@ -343,8 +409,8 @@ func (r *Request) BuildJobActionPodSpec(name string,
 	buildVolumeMounts := func() []corev1.VolumeMount {
 		volumesMount := []corev1.VolumeMount{
 			{
-				Name:      SyncProgressSharedVolumeName,
-				MountPath: SyncProgressSharedMountPath,
+				Name:      managerSharedVolumeName,
+				MountPath: managerSharedMountPath,
 			},
 		}
 		// only mount the volumes when the backup pod is running on the target pod node.
@@ -355,13 +421,18 @@ func (r *Request) BuildJobActionPodSpec(name string,
 	}
 
 	runAsUser := int64(0)
-	env := buildEnv()
+	env, err := buildEnv()
+	if err != nil {
+		return nil, err
+	}
+	// expand the image value with the env variables.
+	image := common.Expand(job.Image, common.MappingFuncFor(utils.CovertEnvToMap(env)))
 	container := corev1.Container{
-		Name: name,
-		// expand the image value with the env variables.
-		Image:           common.Expand(job.Image, common.MappingFuncFor(utils.CovertEnvToMap(env))),
+		Name:            name,
+		Image:           intctrlutil.ReplaceImageRegistry(image),
 		Command:         job.Command,
 		Env:             env,
+		EnvFrom:         targetPod.Spec.Containers[0].EnvFrom,
 		VolumeMounts:    buildVolumeMounts(),
 		ImagePullPolicy: corev1.PullPolicy(viper.GetString(constant.KBImagePullPolicy)),
 		SecurityContext: &corev1.SecurityContext{
@@ -375,7 +446,7 @@ func (r *Request) BuildJobActionPodSpec(name string,
 	}
 
 	if r.ActionSet != nil {
-		container.EnvFrom = r.ActionSet.Spec.EnvFrom
+		container.EnvFrom = append(container.EnvFrom, r.ActionSet.Spec.EnvFrom...)
 	}
 
 	intctrlutil.InjectZeroResourcesLimitsIfEmpty(&container)
@@ -383,7 +454,7 @@ func (r *Request) BuildJobActionPodSpec(name string,
 	podSpec := &corev1.PodSpec{
 		Containers:         []corev1.Container{container},
 		Volumes:            buildVolumes(),
-		ServiceAccountName: r.targetServiceAccountName(),
+		ServiceAccountName: r.WorkerServiceAccount,
 		RestartPolicy:      corev1.RestartPolicyNever,
 	}
 
@@ -402,7 +473,7 @@ func (r *Request) BuildJobActionPodSpec(name string,
 	}
 
 	utils.InjectDatasafed(podSpec, r.BackupRepo, RepoVolumeMountPath,
-		BuildBackupPath(r.Backup, r.BackupPolicy.Spec.PathPrefix))
+		r.Status.EncryptionConfig, r.Status.KopiaRepoPath)
 	return podSpec, nil
 }
 
@@ -416,41 +487,91 @@ func (r *Request) buildSyncProgressCommand() string {
 set -o errexit
 set -o nounset
 
-function update_backup_stauts() {
-  local backup_info_file="$1"
-  local exit_file="$1.exit"
-  local sleep_seconds="$2"
-  while true; do 
-    if [ -f "$exit_file" ]; then
-      echo "exit file $exit_file exists, exit"
-      exit 1
-    fi
-    if [ -f "$backup_info_file" ]; then
-      break
-    fi
-    echo "backup info file not exists, wait for ${sleep_seconds}s"
-    sleep $sleep_seconds
-  done
-  local backup_info=$(cat $backup_info_file)
-  echo backupInfo:${backup_info}
-  local namespace="$3"
-  local backup_name="$4"
-  eval kubectl -n "$namespace" patch backup "$backup_name" --subresource=status --type=merge --patch '{\"status\":${backup_info}}'
-}
-update_backup_stauts ${%s} ${%s} %s %s
+export PATH="$PATH:$DP_DATASAFED_BIN_PATH"
+export DATASAFED_BACKEND_BASE_PATH="$DP_BACKUP_BASE_PATH"
+
+backup_info_file="${%s}"
+sleep_seconds="${%s}"
+namespace="%s"
+backup_name="%s"
+
+if [ "$sleep_seconds" -le 0 ]; then
+  sleep_seconds=30
+fi
+
+exit_file="${backup_info_file}.exit"
+while true; do
+  if [ -f "$exit_file" ]; then
+    echo "exit file $exit_file exists, exit"
+    exit 1
+  fi
+  if [ -f "$backup_info_file" ]; then
+    break
+  fi
+  echo "backup info file not exists, wait for ${sleep_seconds}s"
+  sleep "$sleep_seconds"
+done
+
+backup_info=$(cat "$backup_info_file")
+echo "backupInfo:${backup_info}"
+
+status="{\"status\":${backup_info}}"
+kubectl -n "$namespace" patch backups.dataprotection.kubeblocks.io "$backup_name" --subresource=status --type=merge --patch "${status}"
+
+# save the backup CR object to the backup repo
+kubectl -n "$namespace" get backups.dataprotection.kubeblocks.io "$backup_name" -o json | datasafed push - "/kubeblocks-backup.json"
 `, dptypes.DPBackupInfoFile, dptypes.DPCheckInterval, r.Backup.Namespace, r.Backup.Name)
 }
 
-// InjectSyncProgressContainer injects a container to sync the backup progress.
-func (r *Request) InjectSyncProgressContainer(podSpec *corev1.PodSpec,
+func (r *Request) buildContinuousSyncProgressCommand() string {
+	// sync progress script will wait for the backup info file to be created,
+	// if the file is created, it will update the backup status and exit.
+	// If an exit file named with the backup info file with .exit suffix exists,
+	// it indicates that the container for backing up data exited abnormally,
+	// this script will exit.
+	return fmt.Sprintf(`
+set -o errexit
+set -o nounset
+
+retryTimes=0
+oldBackupInfo=
+backupInfoFile=${%s}
+trap "echo 'Terminating...' && exit" TERM
+while true; do
+  sleep ${%s};
+  if [ ! -f ${backupInfoFile} ]; then
+    continue
+  fi
+  backupInfo=$(cat ${backupInfoFile})
+  if [ "${oldBackupInfo}" == "${backupInfo}" ]; then
+    continue
+  fi
+  echo "start to patch backupInfo: ${backupInfo}"
+  status="{\"status\":${backupInfo}}"
+  kubectl -n %s patch backups.dataprotection.kubeblocks.io %s --subresource=status --type=merge --patch "${status}"
+  if [ $? -ne 0 ]; then
+    retryTimes=$(($retryTimes+1))
+  else
+    echo "update backup status successfully"
+    retryTimes=0
+    oldBackupInfo=${backupInfo}
+  fi
+  if [ $retryTimes -ge 3 ]; then
+    echo "ERROR: update backup status failed, 3 attempts have been made!"
+    exit 1
+  fi
+done
+`, dptypes.DPBackupInfoFile, dptypes.DPCheckInterval, r.Backup.Namespace, r.Backup.Name)
+}
+
+// InjectManagerContainer injects a sidecar that will sync the backup status
+// or push the backup CR object to the backup repo.
+func (r *Request) InjectManagerContainer(podSpec *corev1.PodSpec,
 	sync *dpv1alpha1.SyncProgress, command string) {
-	if !boolptr.IsSetToTrue(sync.Enabled) {
-		return
-	}
 
 	// build container to sync backup progress that will update the backup status
 	container := podSpec.Containers[0].DeepCopy()
-	container.Name = SyncProgressContainerName
+	container.Name = managerContainerName
 	container.Image = viper.GetString(constant.KBToolsImage)
 	container.ImagePullPolicy = corev1.PullPolicy(viper.GetString(constant.KBImagePullPolicy))
 	container.Resources = corev1.ResourceRequirements{Limits: nil, Requests: nil}
@@ -459,7 +580,7 @@ func (r *Request) InjectSyncProgressContainer(podSpec *corev1.PodSpec,
 
 	// append some envs
 	checkIntervalSeconds := int32(5)
-	if sync.IntervalSeconds != nil && *sync.IntervalSeconds > 0 {
+	if sync != nil && sync.IntervalSeconds != nil && *sync.IntervalSeconds > 0 {
 		checkIntervalSeconds = *sync.IntervalSeconds
 	}
 	container.Env = append(container.Env,
@@ -473,14 +594,4 @@ func (r *Request) InjectSyncProgressContainer(podSpec *corev1.PodSpec,
 
 func (r *Request) backupActionSetExists() bool {
 	return r.ActionSet != nil && r.ActionSet.Spec.Backup != nil
-}
-
-func (r *Request) targetServiceAccountName() string {
-	saName := r.BackupPolicy.Spec.Target.ServiceAccountName
-	if len(saName) > 0 {
-		return saName
-	}
-	// service account name is not specified, use the target pod service account
-	targetPod := r.TargetPods[0]
-	return targetPod.Spec.ServiceAccountName
 }

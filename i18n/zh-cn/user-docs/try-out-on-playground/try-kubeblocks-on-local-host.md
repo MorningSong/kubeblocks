@@ -22,7 +22,7 @@ sidebar_label: 在本地使用 KubeBlocks
 * 在电脑上已安装：
   * [Docker](https://docs.docker.com/get-docker/)：v20.10.5（runc ≥ v1.0.0-rc93）或更高版本；
   * [kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl)：用于与 Kubernetes 集群进行交互；
-  * [kbcli](./../installation/install-with-kbcli/install-kbcli.md)：用于 Playground 和 KubeBlocks 之间的交互。
+  * [kbcli](./../installation/install-kbcli.md)：用于 Playground 和 KubeBlocks 之间的交互。
 
 ## 初始化 Playground
 
@@ -100,7 +100,7 @@ kbcli cluster connect mycluster
 1. 获取连接凭证。
 
    ```bash
-   kbcli cluster connect --show-example --client=cli mycluster
+   kbcli cluster connect --show-example --show-password --client=cli mycluster
    ```
 
 2. 执行 `port-forward`。
@@ -133,27 +133,6 @@ kbcli cluster connect mycluster
    +--------------------+
    5 rows in set (0.02 sec)
    ```
-
-### 观测 MySQL 集群
-
-KubeBlocks 具备完整的可观测性能力，下面主要演示其中的监控功能。
-
-***步骤:***
-
-1. 打开 Grafana 仪表盘。
-
-   ```bash
-   kbcli dashboard open kubeblocks-grafana
-   ```
-
-   **结果：**
-
-   命令执行后，将自动加载出 Grafana 网站的监控页面。
-
-2. 点击左侧栏的仪表盘图标，页面上会显示两个监控面板。
-   ![Dashboards](../../img/try-kb-on-local-dashboard.png)
-3. 点击 **General** -> **MySQL**，监控 MySQL 集群的状态。
-   ![MySQL_panel](../../img/try-kb-on-local-mysql-panel.png)
 
 ### MySQL 的高可用性
 

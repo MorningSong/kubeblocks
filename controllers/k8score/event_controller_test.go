@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -21,6 +21,7 @@ package k8score
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,15 +33,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
-	workloads "github.com/apecloud/kubeblocks/apis/workloads/v1alpha1"
+	appsv1 "github.com/apecloud/kubeblocks/apis/apps/v1"
+	workloads "github.com/apecloud/kubeblocks/apis/workloads/v1"
 	"github.com/apecloud/kubeblocks/pkg/constant"
 	"github.com/apecloud/kubeblocks/pkg/controller/builder"
-	intctrlutil "github.com/apecloud/kubeblocks/pkg/controllerutil"
+	"github.com/apecloud/kubeblocks/pkg/controller/instanceset"
 	"github.com/apecloud/kubeblocks/pkg/generics"
-	lorryutil "github.com/apecloud/kubeblocks/pkg/lorry/util"
 	testapps "github.com/apecloud/kubeblocks/pkg/testutil/apps"
 )
 
@@ -62,6 +61,15 @@ var _ = Describe("Event Controller", func() {
 		testapps.ClearResources(&testCtx, generics.PodSignature, inNS, ml)
 	}
 
+	const (
+		// roleChangedAnnotKey is used to mark the role change event has been handled.
+		roleChangedAnnotKey = "role.kubeblocks.io/event-handled"
+
+		// TODO(v1.0): remove this later.
+		checkRoleOperation  = "checkRole"
+		lorryEventFieldPath = "spec.containers{lorry}"
+	)
+
 	var (
 		beforeLastTS = time.Date(2021, time.January, 1, 12, 0, 0, 0, time.UTC)
 		initLastTS   = time.Date(2022, time.January, 1, 12, 0, 0, 0, time.UTC)
@@ -76,12 +84,13 @@ var _ = Describe("Event Controller", func() {
 			Namespace:  testCtx.DefaultNamespace,
 			Name:       podName,
 			UID:        podUid,
+			FieldPath:  lorryEventFieldPath,
 		}
 		eventName := strings.Join([]string{podName, seq}, ".")
 		return builder.NewEventBuilder(testCtx.DefaultNamespace, eventName).
 			SetInvolvedObject(objectRef).
 			SetMessage(fmt.Sprintf("{\"event\":\"roleChanged\",\"originalRole\":\"secondary\",\"role\":\"%s\"}", role)).
-			SetReason(string(lorryutil.CheckRoleOperation)).
+			SetReason(checkRoleOperation).
 			SetType(corev1.EventTypeNormal).
 			SetFirstTimestamp(metav1.NewTime(initLastTS)).
 			SetLastTimestamp(metav1.NewTime(initLastTS)).
@@ -92,10 +101,11 @@ var _ = Describe("Event Controller", func() {
 			GetObject()
 	}
 
-	createInvolvedPod := func(name, clusterName, componentName string) *corev1.Pod {
+	createInvolvedPod := func(name, clusterName, componentName, itsName string) *corev1.Pod {
 		return builder.NewPodBuilder(testCtx.DefaultNamespace, name).
 			AddLabels(constant.AppInstanceLabelKey, clusterName).
 			AddLabels(constant.KBAppComponentLabelKey, componentName).
+			AddLabels(instanceset.WorkloadsInstanceLabelKey, itsName).
 			SetContainers([]corev1.Container{
 				{
 					Image: "foo",
@@ -111,26 +121,27 @@ var _ = Describe("Event Controller", func() {
 
 	Context("When receiving role changed event", func() {
 		It("should handle it properly", func() {
-			By("create cluster & clusterDef")
-			clusterDefName := "foo"
-			consensusCompName := "consensus"
-			consensusCompDefName := "consensus"
-			clusterDefObj := testapps.NewClusterDefFactory(clusterDefName).
-				AddComponentDef(testapps.ConsensusMySQLComponent, consensusCompDefName).
+			By("create cluster & compdef")
+			compDefName := "test-compdef"
+			clusterName := "test-cluster"
+			defaultCompName := "mysql"
+			compDefObj := testapps.NewComponentDefinitionFactory(compDefName).
+				SetDefaultSpec().
+				Create(&testCtx).
+				GetObject()
+			clusterObj := testapps.NewClusterFactory(testCtx.DefaultNamespace, clusterName, "").
+				WithRandomName().
+				AddComponent(defaultCompName, compDefObj.GetName()).
 				Create(&testCtx).GetObject()
-			clusterObj := testapps.NewClusterFactory(testCtx.DefaultNamespace, "",
-				clusterDefObj.Name, "").WithRandomName().
-				AddComponent(consensusCompName, consensusCompDefName).
-				Create(&testCtx).GetObject()
-			Eventually(testapps.CheckObjExists(&testCtx, client.ObjectKeyFromObject(clusterObj), &appsv1alpha1.Cluster{}, true)).Should(Succeed())
+			Eventually(testapps.CheckObjExists(&testCtx, client.ObjectKeyFromObject(clusterObj), &appsv1.Cluster{}, true)).Should(Succeed())
 
-			rsmName := fmt.Sprintf("%s-%s", clusterObj.Name, consensusCompName)
-			rsm := testapps.NewRSMFactory(clusterObj.Namespace, rsmName, clusterObj.Name, consensusCompName).
+			itsName := fmt.Sprintf("%s-%s", clusterObj.Name, defaultCompName)
+			its := testapps.NewInstanceSetFactory(clusterObj.Namespace, itsName, clusterObj.Name, defaultCompName).
 				SetReplicas(int32(3)).
 				AddContainer(corev1.Container{Name: testapps.DefaultMySQLContainerName, Image: testapps.ApeCloudMySQLImage}).
 				Create(&testCtx).GetObject()
-			Expect(testapps.GetAndChangeObj(&testCtx, client.ObjectKeyFromObject(rsm), func(tmpRSM *workloads.ReplicatedStateMachine) {
-				tmpRSM.Spec.Roles = []workloads.ReplicaRole{
+			Expect(testapps.GetAndChangeObj(&testCtx, client.ObjectKeyFromObject(its), func(tmpITS *workloads.InstanceSet) {
+				tmpITS.Spec.Roles = []workloads.ReplicaRole{
 					{
 						Name:       "leader",
 						IsLeader:   true,
@@ -147,8 +158,8 @@ var _ = Describe("Event Controller", func() {
 			})()).Should(Succeed())
 			By("create involved pod")
 			var uid types.UID
-			podName := fmt.Sprintf("%s-%d", rsmName, 0)
-			pod := createInvolvedPod(podName, clusterObj.Name, consensusCompName)
+			podName := fmt.Sprintf("%s-%d", itsName, 0)
+			pod := createInvolvedPod(podName, clusterObj.Name, defaultCompName, itsName)
 			Expect(testCtx.CreateObj(ctx, pod)).Should(Succeed())
 			Eventually(func() error {
 				p := &corev1.Pod{}
@@ -181,7 +192,7 @@ var _ = Describe("Event Controller", func() {
 				g.Expect(p).ShouldNot(BeNil())
 				g.Expect(p.Labels).ShouldNot(BeNil())
 				g.Expect(p.Labels[constant.RoleLabelKey]).Should(Equal(role))
-				g.Expect(p.Annotations[constant.LastRoleSnapshotVersionAnnotationKey]).Should(Equal(sndEvent.EventTime.Time.Format(time.RFC3339Nano)))
+				g.Expect(p.Annotations[constant.LastRoleSnapshotVersionAnnotationKey]).Should(Equal(strconv.FormatInt(sndEvent.EventTime.UnixMicro(), 10)))
 			})).Should(Succeed())
 
 			Eventually(testapps.CheckObj(&testCtx, client.ObjectKeyFromObject(sndEvent), func(g Gomega, e *corev1.Event) {
@@ -189,9 +200,6 @@ var _ = Describe("Event Controller", func() {
 				g.Expect(e.Annotations).ShouldNot(BeNil())
 				g.Expect(e.Annotations[roleChangedAnnotKey]).Should(Equal("count-0"))
 			})).Should(Succeed())
-
-			By("check whether the duration and number of events reach the threshold")
-			Expect(IsOvertimeEvent(sndEvent, 5*time.Second)).Should(BeFalse())
 
 			By("send role changed event with beforeLastTS earlier than pod last role changes event timestamp annotation should not be update successfully")
 			role = "follower"
@@ -212,13 +220,13 @@ var _ = Describe("Event Controller", func() {
 				g.Expect(p).ShouldNot(BeNil())
 				g.Expect(p.Labels).ShouldNot(BeNil())
 				g.Expect(p.Labels[constant.RoleLabelKey]).ShouldNot(Equal(role))
-				g.Expect(p.Annotations[constant.LastRoleSnapshotVersionAnnotationKey]).ShouldNot(Equal(sndInvalidEvent.EventTime.Time.Format(time.RFC3339Nano)))
+				g.Expect(p.Annotations[constant.LastRoleSnapshotVersionAnnotationKey]).ShouldNot(Equal(strconv.FormatInt(sndInvalidEvent.EventTime.UnixMicro(), 10)))
 			})).Should(Succeed())
 
 			By("send role changed event with afterLastTS later than pod last role changes event timestamp annotation should be update successfully")
 			role = "follower"
 			sndValidEvent := createRoleChangedEvent(podName, role, uid)
-			sndValidEvent.EventTime = metav1.NewMicroTime(afterLastTS)
+			sndValidEvent.LastTimestamp = metav1.NewTime(afterLastTS)
 			Expect(testCtx.CreateObj(ctx, sndValidEvent)).Should(Succeed())
 			Eventually(func() string {
 				event := &corev1.Event{}
@@ -234,39 +242,8 @@ var _ = Describe("Event Controller", func() {
 				g.Expect(p).ShouldNot(BeNil())
 				g.Expect(p.Labels).ShouldNot(BeNil())
 				g.Expect(p.Labels[constant.RoleLabelKey]).Should(Equal(role))
-				g.Expect(p.Annotations[constant.LastRoleSnapshotVersionAnnotationKey]).Should(Equal(sndValidEvent.EventTime.Time.Format(time.RFC3339Nano)))
+				g.Expect(p.Annotations[constant.LastRoleSnapshotVersionAnnotationKey]).Should(Equal(strconv.FormatInt(sndValidEvent.LastTimestamp.UnixMicro(), 10)))
 			})).Should(Succeed())
-		})
-	})
-
-	Context("ParseProbeEventMessage function", func() {
-		It("should work well", func() {
-			reqCtx := intctrlutil.RequestCtx{
-				Ctx: testCtx.Ctx,
-				Log: log.FromContext(ctx).WithValues("event", testCtx.DefaultNamespace),
-			}
-			event := createRoleChangedEvent("foo", "", "bar")
-			event.Message = "not-a-role-message"
-			eventMessage := ParseProbeEventMessage(reqCtx, event)
-			Expect(eventMessage).Should(BeNil())
-		})
-	})
-
-	Context("IsOvertimeEvent function", func() {
-		It("should work well", func() {
-			event := createRoleChangedEvent("foo", "", "bar")
-			timeout := 50 * time.Millisecond
-			event.FirstTimestamp = metav1.NewTime(time.Now())
-			event.LastTimestamp = metav1.NewTime(time.Now())
-			Expect(IsOvertimeEvent(event, timeout)).Should(BeFalse())
-			event.LastTimestamp = metav1.NewTime(event.LastTimestamp.Time.Add(2 * timeout))
-			Expect(IsOvertimeEvent(event, timeout)).Should(BeTrue())
-
-			event.EventTime = metav1.NewMicroTime(time.Now())
-			event.Series = &corev1.EventSeries{LastObservedTime: metav1.NewMicroTime(time.Now())}
-			Expect(IsOvertimeEvent(event, timeout)).Should(BeFalse())
-			event.Series = &corev1.EventSeries{LastObservedTime: metav1.NewMicroTime(time.Now().Add(2 * timeout))}
-			Expect(IsOvertimeEvent(event, timeout)).Should(BeTrue())
 		})
 	})
 })

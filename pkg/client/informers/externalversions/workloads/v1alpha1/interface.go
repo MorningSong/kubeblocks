@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,8 +24,8 @@ import (
 
 // Interface provides access to all the informers in this group version.
 type Interface interface {
-	// ReplicatedStateMachines returns a ReplicatedStateMachineInformer.
-	ReplicatedStateMachines() ReplicatedStateMachineInformer
+	// InstanceSets returns a InstanceSetInformer.
+	InstanceSets() InstanceSetInformer
 }
 
 type version struct {
@@ -39,7 +39,7 @@ func New(f internalinterfaces.SharedInformerFactory, namespace string, tweakList
 	return &version{factory: f, namespace: namespace, tweakListOptions: tweakListOptions}
 }
 
-// ReplicatedStateMachines returns a ReplicatedStateMachineInformer.
-func (v *version) ReplicatedStateMachines() ReplicatedStateMachineInformer {
-	return &replicatedStateMachineInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+// InstanceSets returns a InstanceSetInformer.
+func (v *version) InstanceSets() InstanceSetInformer {
+	return &instanceSetInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }

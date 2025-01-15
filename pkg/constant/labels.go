@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -19,95 +19,86 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package constant
 
-// GetKBConfigMapWellKnownLabels returns the well-known labels for KB ConfigMap
-func GetKBConfigMapWellKnownLabels(cmTplName, clusterDefName, clusterName, componentName string) map[string]string {
-	return map[string]string{
-		CMTemplateNameLabelKey: cmTplName,
-		AppNameLabelKey:        clusterDefName,
-		AppInstanceLabelKey:    clusterName,
-		KBAppComponentLabelKey: componentName,
-	}
-}
+// k8s recommended well-known label keys
+const (
+	AppVersionLabelKey = "app.kubernetes.io/version"
 
-// GetKBWellKnownLabels returns the well-known labels for KB resources with ClusterDefinition API
-func GetKBWellKnownLabels(clusterDefName, clusterName, componentName string) map[string]string {
-	return map[string]string{
-		AppManagedByLabelKey:   AppName,
-		AppNameLabelKey:        clusterDefName,
-		AppInstanceLabelKey:    clusterName,
-		KBAppComponentLabelKey: componentName,
-	}
-}
+	AppManagedByLabelKey = "app.kubernetes.io/managed-by"
 
-// GetKBWellKnownLabelsWithCompDef returns the well-known labels for KB resources with ComponentDefinition API
-func GetKBWellKnownLabelsWithCompDef(compDefName, clusterName, componentName string) map[string]string {
-	return map[string]string{
-		AppManagedByLabelKey:   AppName,
-		AppNameLabelKey:        compDefName, // TODO: reusing AppNameLabelKey for compDefName ?
-		AppInstanceLabelKey:    clusterName,
-		KBAppComponentLabelKey: componentName,
-	}
-}
+	AppNameLabelKey      = "app.kubernetes.io/name"
+	AppComponentLabelKey = "app.kubernetes.io/component"
 
-// GetClusterWellKnownLabels returns the well-known labels for a cluster
-func GetClusterWellKnownLabels(clusterName string) map[string]string {
-	return map[string]string{
+	AppInstanceLabelKey = "app.kubernetes.io/instance"
+)
+
+// labels defined by KubeBlocks
+const (
+	ClusterDefLabelKey            = "clusterdefinition.kubeblocks.io/name"
+	ShardingDefLabelKey           = "shardingdefinition.kubeblocks.io/name"
+	ComponentDefinitionLabelKey   = "componentdefinition.kubeblocks.io/name"
+	ComponentVersionLabelKey      = "componentversion.kubeblocks.io/name"
+	SidecarDefLabelKey            = "sidecardefinition.kubeblocks.io/name"
+	ServiceDescriptorNameLabelKey = "servicedescriptor.kubeblocks.io/name"
+	AddonNameLabelKey             = "extensions.kubeblocks.io/addon-name"
+
+	KBAppComponentLabelKey    = "apps.kubeblocks.io/component-name"
+	KBAppShardingNameLabelKey = "apps.kubeblocks.io/sharding-name"
+
+	KBAppComponentInstanceTemplateLabelKey = "apps.kubeblocks.io/instance-template"
+	PVCNameLabelKey                        = "apps.kubeblocks.io/pvc-name"
+	VolumeClaimTemplateNameLabelKey        = "apps.kubeblocks.io/vct-name"
+	KBAppPodNameLabelKey                   = "apps.kubeblocks.io/pod-name"
+
+	RoleLabelKey           = "kubeblocks.io/role" // RoleLabelKey consensusSet and replicationSet role label key
+	KBAppServiceVersionKey = "apps.kubeblocks.io/service-version"
+	AccessModeLabelKey     = "workloads.kubeblocks.io/access-mode"
+	ReadyWithoutPrimaryKey = "kubeblocks.io/ready-without-primary"
+)
+
+func GetClusterLabels(clusterName string, labels ...map[string]string) map[string]string {
+	return withShardingNameLabel(map[string]string{
 		AppManagedByLabelKey: AppName,
 		AppInstanceLabelKey:  clusterName,
-	}
+	}, labels...)
 }
 
-// GetComponentWellKnownLabels returns the well-known labels for Component API
-func GetComponentWellKnownLabels(clusterName, componentName string) map[string]string {
+func GetCompLabels(clusterName, compName string, labels ...map[string]string) map[string]string {
+	return withShardingNameLabel(map[string]string{
+		AppManagedByLabelKey:   AppName,
+		AppInstanceLabelKey:    clusterName,
+		KBAppComponentLabelKey: compName,
+	}, labels...)
+}
+
+func GetCompLabelsWithDef(clusterName, compName, compDef string, labels ...map[string]string) map[string]string {
+	m := map[string]string{
+		AppManagedByLabelKey:   AppName,
+		AppInstanceLabelKey:    clusterName,
+		KBAppComponentLabelKey: compName,
+	}
+	if len(compDef) > 0 {
+		m[AppComponentLabelKey] = compDef
+	}
+	return withShardingNameLabel(m, labels...)
+}
+
+func GetConfigurationLabels(clusterName, compName, cmTplName string) map[string]string {
 	return map[string]string{
 		AppManagedByLabelKey:   AppName,
 		AppInstanceLabelKey:    clusterName,
-		KBAppComponentLabelKey: componentName,
+		KBAppComponentLabelKey: compName,
+		CMTemplateNameLabelKey: cmTplName,
 	}
 }
 
-// GetAppVersionLabel returns the label for AppVersion
-func GetAppVersionLabel(appVersion string) map[string]string {
-	return map[string]string{
-		AppVersionLabelKey: appVersion,
+func withShardingNameLabel(labels map[string]string, extraLabels ...map[string]string) map[string]string {
+	for _, m := range extraLabels {
+		if m != nil {
+			if v, ok := m[KBAppShardingNameLabelKey]; ok {
+				labels[KBAppShardingNameLabelKey] = v
+				break
+			}
+		}
 	}
-}
-
-// GetComponentDefLabel returns the label for ComponentDefinition (refer ComponentDefinition.Name)
-func GetComponentDefLabel(compDefName string) map[string]string {
-	return map[string]string{
-		AppComponentLabelKey: compDefName,
-	}
-}
-
-// GetClusterCompDefLabel returns the label for ClusterComponentDefinition (refer clusterDefinition.Spec.ComponentDefs[*].Name)
-// TODO:ClusterCompDef will be deprecated in the future
-func GetClusterCompDefLabel(clusterCompDefName string) map[string]string {
-	return map[string]string{
-		AppComponentLabelKey: clusterCompDefName,
-	}
-}
-
-// GetWorkloadTypeLabel returns the label for WorkloadType (refer clusterDefinition.Spec.ComponentDefs[*].WorkloadType)
-// TODO:workloadType will be deprecated in the future
-func GetWorkloadTypeLabel(workloadType string) map[string]string {
-	return map[string]string{
-		WorkloadTypeLabelKey: workloadType,
-	}
-}
-
-// GetClusterVersionLabel returns the label for ClusterVersion
-// TODO:clusterVersion will be deprecated in the future
-func GetClusterVersionLabel(clusterVersion string) map[string]string {
-	return map[string]string{
-		AppVersionLabelKey: clusterVersion,
-	}
-}
-
-// GetClusterDefTypeLabel returns the label for ClusterDefinition type (refer clusterDefinition.Spec.Type)
-// TODO:clusterDefType will be deprecated in the future
-func GetClusterDefTypeLabel(clusterDefType string) map[string]string {
-	return map[string]string{
-		KBAppClusterDefTypeLabelKey: clusterDefType,
-	}
+	return labels
 }

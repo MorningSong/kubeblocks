@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -19,10 +19,17 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package common
 
+import (
+	"k8s.io/apimachinery/pkg/util/intstr"
+
+	appsv1 "github.com/apecloud/kubeblocks/apis/apps/v1"
+)
+
 // PodRoleNamePair defines a pod name and role name pair.
 type PodRoleNamePair struct {
 	PodName  string `json:"podName,omitempty"`
 	RoleName string `json:"roleName,omitempty"`
+	PodUID   string `json:"podUid,omitempty"`
 }
 
 // GlobalRoleSnapshot defines a global(leader) perspective of all pods role.
@@ -38,15 +45,8 @@ type GlobalRoleSnapshot struct {
 	PodRoleNamePairs []PodRoleNamePair `json:"PodRoleNamePairs,omitempty"`
 }
 
-// BuiltinHandler defines builtin role probe handler name.
-type BuiltinHandler string
-
-const (
-	MySQLHandler    BuiltinHandler = "mysql"
-	PostgresHandler BuiltinHandler = "postgres"
-	MongoDBHandler  BuiltinHandler = "mongodb"
-	RedisHandler    BuiltinHandler = "redis"
-	ETCDHandler     BuiltinHandler = "etcd"
-	KafkaHandler    BuiltinHandler = "kafka"
-	WeSQLHandler    BuiltinHandler = "wesql"
-)
+// Exporter defines the built-in metrics exporter.
+type Exporter struct {
+	appsv1.Exporter `json:",inline"`
+	TargetPort      *intstr.IntOrString `json:"targetPort,omitempty"`
+}

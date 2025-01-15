@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -34,11 +34,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	// +kubebuilder:scaffold:imports
 
-	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
-	workloadsv1alpha1 "github.com/apecloud/kubeblocks/apis/workloads/v1alpha1"
+	workloadsv1 "github.com/apecloud/kubeblocks/apis/workloads/v1"
 	"github.com/apecloud/kubeblocks/pkg/testutil"
 )
 
@@ -75,7 +75,7 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	Expect(cfg).NotTo(BeNil())
 
-	err = workloadsv1alpha1.AddToScheme(scheme.Scheme)
+	err = workloadsv1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 
 	// +kubebuilder:scaffold:scheme
@@ -88,20 +88,18 @@ var _ = BeforeSuite(func() {
 
 	// run reconcile
 	k8sManager, err := ctrl.NewManager(cfg, ctrl.Options{
-		Scheme:             scheme.Scheme,
-		MetricsBindAddress: "0",
+		Scheme:  scheme.Scheme,
+		Metrics: server.Options{BindAddress: "0"},
 	})
 	Expect(err).ToNot(HaveOccurred())
 
 	recorder := k8sManager.GetEventRecorderFor("consensus-set-controller")
-	err = (&ReplicatedStateMachineReconciler{
+	err = (&InstanceSetReconciler{
 		Client:   k8sManager.GetClient(),
 		Scheme:   k8sManager.GetScheme(),
 		Recorder: recorder,
-	}).SetupWithManager(k8sManager)
+	}).SetupWithManager(k8sManager, nil)
 	Expect(err).ToNot(HaveOccurred())
-
-	appsv1alpha1.RegisterWebhookManager(k8sManager)
 
 	go func() {
 		defer GinkgoRecover()

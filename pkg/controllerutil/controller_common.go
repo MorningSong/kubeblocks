@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -23,7 +23,9 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -32,14 +34,16 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/conversion"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	"github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
+	appsv1 "github.com/apecloud/kubeblocks/apis/apps/v1"
 	"github.com/apecloud/kubeblocks/pkg/constant"
+	viper "github.com/apecloud/kubeblocks/pkg/viperx"
 )
 
 // ResultToP converts a Result object to a pointer.
@@ -130,9 +134,9 @@ func HandleCRDeletion(reqCtx RequestCtx,
 			// If the resource has dependencies, it will not be automatically deleted.
 			// It can also prevent users from manually deleting it without event records
 			if reqCtx.Recorder != nil {
-				cluster, ok := cr.(*v1alpha1.Cluster)
+				cluster, ok := cr.(*appsv1.Cluster)
 				// throw warning event if terminationPolicy set to DoNotTerminate
-				if ok && cluster.Spec.TerminationPolicy == v1alpha1.DoNotTerminate {
+				if ok && cluster.Spec.TerminationPolicy == appsv1.DoNotTerminate {
 					reqCtx.Eventf(cr, corev1.EventTypeWarning, constant.ReasonDeleteFailed,
 						"Deleting %s: %s failed due to terminationPolicy set to DoNotTerminate",
 						strings.ToLower(cr.GetObjectKind().GroupVersionKind().Kind), cr.GetName())
@@ -207,17 +211,6 @@ func RecordCreatedEvent(r record.EventRecorder, cr client.Object) {
 	}
 }
 
-// WorkloadFilterPredicate provides filter predicate for workload objects, i.e., deployment/statefulset/pod/pvc.
-func WorkloadFilterPredicate(object client.Object) bool {
-	_, containCompNameLabelKey := object.GetLabels()[constant.KBAppComponentLabelKey]
-	return ManagedByKubeBlocksFilterPredicate(object) && containCompNameLabelKey
-}
-
-// ManagedByKubeBlocksFilterPredicate provides filter predicate for objects managed by kubeBlocks.
-func ManagedByKubeBlocksFilterPredicate(object client.Object) bool {
-	return object.GetLabels()[constant.AppManagedByLabelKey] == constant.AppName
-}
-
 // IgnoreIsAlreadyExists returns errors if 'err' is not type of AlreadyExists
 func IgnoreIsAlreadyExists(err error) error {
 	if !apierrors.IsAlreadyExists(err) {
@@ -227,13 +220,13 @@ func IgnoreIsAlreadyExists(err error) error {
 }
 
 // BackgroundDeleteObject deletes the object in the background, usually used in the Reconcile method
-func BackgroundDeleteObject(cli client.Client, ctx context.Context, obj client.Object) error {
+func BackgroundDeleteObject(cli client.Client, ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
 	deletePropagation := metav1.DeletePropagationBackground
 	deleteOptions := &client.DeleteOptions{
 		PropagationPolicy: &deletePropagation,
 	}
 
-	if err := cli.Delete(ctx, obj, deleteOptions); err != nil {
+	if err := cli.Delete(ctx, obj, append([]client.DeleteOption{deleteOptions}, opts...)...); err != nil {
 		return client.IgnoreNotFound(err)
 	}
 	return nil
@@ -251,11 +244,10 @@ func SetOwnership(owner, obj client.Object, scheme *runtime.Scheme, finalizer st
 			return err
 		}
 	}
-	if !controllerutil.ContainsFinalizer(obj, finalizer) {
+	if len(finalizer) > 0 && !controllerutil.ContainsFinalizer(obj, finalizer) {
 		// pvc objects do not need to add finalizer
 		_, ok := obj.(*corev1.PersistentVolumeClaim)
-		_, isPod := obj.(*corev1.Pod)
-		if !ok && !isPod {
+		if !ok {
 			if !controllerutil.AddFinalizer(obj, finalizer) {
 				return ErrFailedToAddFinalizer
 			}
@@ -267,7 +259,7 @@ func SetOwnership(owner, obj client.Object, scheme *runtime.Scheme, finalizer st
 // CheckResourceExists checks whether resource exist or not.
 func CheckResourceExists(
 	ctx context.Context,
-	cli client.Client,
+	cli client.Reader,
 	key client.ObjectKey,
 	obj client.Object) (bool, error) {
 	if err := cli.Get(ctx, key, obj); err != nil {
@@ -275,4 +267,332 @@ func CheckResourceExists(
 	}
 	// if found, return true
 	return true, nil
+}
+
+var (
+	portManager *PortManager
+)
+
+func InitHostPortManager(cli client.Client) error {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      viper.GetString(constant.CfgHostPortConfigMapName),
+			Namespace: viper.GetString(constant.CfgKeyCtrlrMgrNS),
+		},
+		Data: make(map[string]string),
+	}
+	parsePortRange := func(item string) (int64, int64, error) {
+		parts := strings.Split(item, "-")
+		var (
+			from int64
+			to   int64
+			err  error
+		)
+		switch len(parts) {
+		case 2:
+			from, err = strconv.ParseInt(parts[0], 10, 32)
+			if err != nil {
+				return from, to, err
+			}
+			to, err = strconv.ParseInt(parts[1], 10, 32)
+			if err != nil {
+				return from, to, err
+			}
+			if from > to {
+				return from, to, fmt.Errorf("invalid port range %s", item)
+			}
+		case 1:
+			from, err = strconv.ParseInt(parts[0], 10, 32)
+			if err != nil {
+				return from, to, err
+			}
+			to = from
+		default:
+			return from, to, fmt.Errorf("invalid port range %s", item)
+		}
+		return from, to, nil
+	}
+	parsePortRanges := func(portRanges string) ([]PortRange, error) {
+		var ranges []PortRange
+		for _, item := range strings.Split(portRanges, ",") {
+			item = strings.TrimSpace(item)
+			if item == "" {
+				continue
+			}
+			from, to, err := parsePortRange(item)
+			if err != nil {
+				return nil, err
+			}
+			ranges = append(ranges, PortRange{
+				Min: int32(from),
+				Max: int32(to),
+			})
+		}
+		return ranges, nil
+	}
+	var err error
+	if err = cli.Create(context.Background(), cm); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return err
+		}
+	}
+	includes, err := parsePortRanges(viper.GetString(constant.CfgHostPortIncludeRanges))
+	if err != nil {
+		return err
+	}
+	excludes, err := parsePortRanges(viper.GetString(constant.CfgHostPortExcludeRanges))
+	if err != nil {
+		return err
+	}
+	portManager, err = NewPortManager(includes, excludes, cli)
+	return err
+}
+
+func GetPortManager() *PortManager {
+	return portManager
+}
+
+func BuildHostPortName(clusterName, compName, containerName, portName string) string {
+	return fmt.Sprintf("%s-%s-%s-%s", clusterName, compName, containerName, portName)
+}
+
+type PortManager struct {
+	sync.Mutex
+	cli      client.Client
+	from     int32
+	to       int32
+	cursor   int32
+	includes []PortRange
+	excludes []PortRange
+	used     map[int32]string
+	cm       *corev1.ConfigMap
+}
+
+type PortRange struct {
+	Min int32
+	Max int32
+}
+
+// NewPortManager creates a new PortManager
+// TODO[ziang] Putting all the port information in one configmap may have performance issues and is not secure enough.
+// There is a risk of accidental deletion leading to the loss of cluster port information.
+func NewPortManager(includes []PortRange, excludes []PortRange, cli client.Client) (*PortManager, error) {
+	var (
+		from int32
+		to   int32
+	)
+	for _, item := range includes {
+		if item.Min < from || from == 0 {
+			from = item.Min
+		}
+		if item.Max > to {
+			to = item.Max
+		}
+	}
+	pm := &PortManager{
+		cli:      cli,
+		from:     from,
+		to:       to,
+		cursor:   from,
+		includes: includes,
+		excludes: excludes,
+		used:     make(map[int32]string),
+	}
+	if err := pm.sync(); err != nil {
+		return nil, err
+	}
+	return pm, nil
+}
+
+func (pm *PortManager) parsePort(port string) (int32, error) {
+	port = strings.TrimSpace(port)
+	if port == "" {
+		return 0, fmt.Errorf("port is empty")
+	}
+	p, err := strconv.ParseInt(port, 10, 32)
+	if err != nil {
+		return 0, err
+	}
+	return int32(p), nil
+}
+
+func (pm *PortManager) sync() error {
+	cm := &corev1.ConfigMap{}
+	objKey := types.NamespacedName{
+		Name:      viper.GetString(constant.CfgHostPortConfigMapName),
+		Namespace: viper.GetString(constant.CfgKeyCtrlrMgrNS),
+	}
+	if err := pm.cli.Get(context.Background(), objKey, cm); err != nil {
+		return err
+	}
+	if cm.Data == nil {
+		cm.Data = make(map[string]string)
+	}
+	used := make(map[int32]string)
+	for key, item := range cm.Data {
+		port, err := pm.parsePort(item)
+		if err != nil {
+			continue
+		}
+		used[port] = key
+	}
+	for _, item := range pm.excludes {
+		for port := item.Min; port <= item.Max; port++ {
+			used[port] = ""
+		}
+	}
+
+	pm.cm = cm
+	pm.used = used
+	return nil
+}
+
+func (pm *PortManager) update(key string, port int32) error {
+	var err error
+	defer func() {
+		if apierrors.IsConflict(err) {
+			_ = pm.sync()
+		}
+	}()
+	cm := pm.cm.DeepCopy()
+	if cm.Data == nil {
+		cm.Data = make(map[string]string)
+	}
+	cm.Data[key] = fmt.Sprintf("%d", port)
+	err = pm.cli.Update(context.Background(), cm)
+	if err != nil {
+		return err
+	}
+
+	pm.cm = cm
+	pm.used[port] = key
+	return nil
+}
+
+func (pm *PortManager) delete(keys []string) error {
+	if pm.cm.Data == nil {
+		return nil
+	}
+
+	var err error
+	defer func() {
+		if apierrors.IsConflict(err) {
+			_ = pm.sync()
+		}
+	}()
+
+	cm := pm.cm.DeepCopy()
+	var ports []int32
+	for _, key := range keys {
+		value, ok := cm.Data[key]
+		if !ok {
+			continue
+		}
+		port, err := pm.parsePort(value)
+		if err != nil {
+			return err
+		}
+		ports = append(ports, port)
+		delete(cm.Data, key)
+	}
+	err = pm.cli.Update(context.Background(), cm)
+	if err != nil {
+		return err
+	}
+	pm.cm = cm
+	for _, port := range ports {
+		delete(pm.used, port)
+	}
+	return nil
+}
+
+func (pm *PortManager) GetPort(key string) (int32, error) {
+	pm.Lock()
+	defer pm.Unlock()
+
+	if value, ok := pm.cm.Data[key]; ok {
+		port, err := pm.parsePort(value)
+		if err != nil {
+			return 0, err
+		}
+		return port, nil
+	}
+	return 0, nil
+}
+
+func (pm *PortManager) UsePort(key string, port int32) error {
+	pm.Lock()
+	defer pm.Unlock()
+	if k, ok := pm.used[port]; ok && k != key {
+		return fmt.Errorf("port %d is used by %s", port, k)
+	}
+	if err := pm.update(key, port); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (pm *PortManager) AllocatePort(key string) (int32, error) {
+	pm.Lock()
+	defer pm.Unlock()
+
+	if value, ok := pm.cm.Data[key]; ok {
+		port, err := pm.parsePort(value)
+		if err != nil {
+			return 0, err
+		}
+		return port, nil
+	}
+
+	if len(pm.used) >= int(pm.to-pm.from)+1 {
+		return 0, fmt.Errorf("no available port")
+	}
+
+	for {
+		if _, ok := pm.used[pm.cursor]; !ok {
+			break
+		}
+		pm.cursor++
+		if pm.cursor > pm.to {
+			pm.cursor = pm.from
+		}
+	}
+	if err := pm.update(key, pm.cursor); err != nil {
+		return 0, err
+	}
+	return pm.cursor, nil
+}
+
+func (pm *PortManager) ReleasePort(key string) error {
+	return pm.ReleasePorts([]string{key})
+}
+
+func (pm *PortManager) ReleasePorts(keys []string) error {
+	pm.Lock()
+	defer pm.Unlock()
+	for _, key := range keys {
+		if err := pm.delete([]string{key}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (pm *PortManager) ReleaseByPrefix(prefix string) error {
+	if prefix == "" {
+		return nil
+	}
+	pm.Lock()
+	defer pm.Unlock()
+
+	var keys []string
+	for key := range pm.cm.Data {
+		if strings.HasPrefix(key, prefix) {
+			keys = append(keys, key)
+		}
+	}
+	if err := pm.delete(keys); err != nil {
+		return err
+	}
+	return nil
 }

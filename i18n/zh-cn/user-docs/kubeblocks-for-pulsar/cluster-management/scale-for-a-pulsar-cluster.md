@@ -6,57 +6,61 @@ sidebar_position: 2
 sidebar_label: 扩缩容
 ---
 
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
 # Pulsar 集群扩缩容
+
+KubeBlocks 支持对 Pulsar 集群进行垂直扩缩容和水平扩缩容。
 
 ## 垂直扩缩容
 
-你可以通过更改资源需求和限制（CPU 和存储）来垂直扩展集群。例如，如果你需要将资源类别从 1C2G 更改为 2C4G，就需要进行垂直扩容。
-
-:::note
-
-在垂直扩容时，所有的 Pod 将按照 Learner -> Follower -> Leader 的顺序重启。重启后，主节点可能会发生变化。
-
-:::
+你可以通过更改资源需求和限制（CPU 和存储）来垂直扩展集群。例如，可通过垂直扩容将资源类别从 1C2G 调整为 2C4G。
 
 ### 开始之前
 
-确保集群处于 `Running` 状态，否则以下操作可能会失败。 
+确保集群处于 `Running` 状态，否则以下操作可能会失败。
+
+<Tabs>
+
+<TabItem value="kubectl" label="kubectl"  default>
 
 ```bash
-kbcli cluster list pulsar
+kubectl get cluster mycluster -n demo
 ```
+
+</TabItem>
+
+<TabItem value="kbcli" label="kbcli">
+
+```bash
+kbcli cluster list mycluster -n demo
+```
+
+</TabItem>
+
+</Tabs>
 
 ### 步骤
 
-1. 更改配置。共有 3 种方式进行垂直扩容。
+<Tabs>
 
-   **选项 1.** (**推荐**) 使用 kbcli
+<TabItem value="OpsRequest" label="OpsRequest" default>
 
-   配置参数 `--components`、`--memory` 和 `--cpu`，并执行以下命令。
-
-   ```bash
-   kbcli cluster vscale pulsar --cpu=3 --memory=10Gi --components=broker,bookies  
-   ```
-
-   - `--components` 表示可进行垂直扩容的组件名称。
-   - `--memory` 表示组件请求和限制的内存大小。
-   - `--cpu` 表示组件请求和限制的CPU大小。
-
-   **选项 2.** 创建 OpsRequest
-  
-   将 OpsRequest 应用于指定的集群，根据需求配置参数。
+1. 对指定的集群应用 OpsRequest，可根据您的需求配置参数。
 
    ```bash
    kubectl create -f -<< EOF
    apiVersion: apps.kubeblocks.io/v1alpha1
    kind: OpsRequest
    metadata:
-     generateName: pulsar-vscale-
+     name: ops-vscale
+     namespace: demo
    spec:
-     clusterRef: pulsar
+     clusterName: mycluster
      type: VerticalScaling
      verticalScaling:
-     - componentName: broker
+     - componentName: pulsar-broker
        requests:
          memory: "10Gi"
          cpu: 3
@@ -72,23 +76,116 @@ kbcli cluster list pulsar
          cpu: 3      
    EOF
    ```
-  
-   **选项 3.** 使用 `kubectl` 编辑 Pulsar 集群。
+
+2. 查看运维任务状态，验证垂直扩缩容操作是否成功。
 
    ```bash
-   kubectl edit cluster pulsar
+   kubectl get ops -n demo
+   >
+   NAMESPACE   NAME                   TYPE              CLUSTER     STATUS    PROGRESS   AGE
+   demo        ops-vertical-scaling   VerticalScaling   mycluster   Succeed   3/3        6m
    ```
+
+   如果有报错，可执行 `kubectl describe ops -n demo` 命令查看该运维操作的相关事件，协助排障。
+
+3. 当 OpsRequest 状态为 `Succeed` 或集群状态再次回到 `Running` 后，查看相应资源是否变更。
+
+    ```bash
+    kubectl describe cluster mycluster -n demo
+    ```
+
+</TabItem>
+
+<TabItem value="编辑集群 YAML 文件" label="编辑集群 YAML 文件">
+
+1. 修改 YAML 文件中 `spec.componentSpecs.resources` 的配置。`spec.componentSpecs.resources` 控制资源的请求值和限制值，修改参数值将触发垂直扩缩容。
+
+   ```bash
+   kubectl edit cluster mycluster -n demo
+   ```
+
+   在编辑器中修改 `spec.componentSpecs.resources` 的参数值。
+
+   ```yaml
+   ...
+   spec:
+     affinity:
+       podAntiAffinity: Preferred
+       topologyKeys:
+       - kubernetes.io/hostname
+     clusterDefinitionRef: pulsar
+     clusterVersionRef: pulsar-3.0.2
+     componentSpecs:
+     - componentDefRef: pulsar
+       enabledLogs:
+       - running
+       disableExporter: true
+       name: pulsar
+       replicas: 1
+       resources: # 修改该参数值
+         limits:
+           cpu: "2"
+           memory: 4Gi
+         requests:
+           cpu: "1"
+           memory: 2Gi
+   ...
+   ```
+
+2. 当集群状态再次回到 `Running` 后，查看相应资源是否变更。
+
+   ```bash
+   kubectl describe cluster mycluster -n demo
+   >
+   ...
+   Component Specs:
+    Component Def Ref:  pulsar
+    Enabled Logs:
+      running
+    DisableExporter:   true
+    Name:      pulsar
+    Replicas:  1
+    Resources:
+      Limits:
+        Cpu:     2
+        Memory:  4Gi
+      Requests:
+        Cpu:     1
+        Memory:  2Gi
+   ```
+
+</TabItem>
+
+<TabItem value="kbcli" label="kbcli">
+
+1. 更改配置。
+
+   配置参数 `--components`、`--memory` 和 `--cpu`，并执行以下命令。
+
+   ```bash
+   kbcli cluster vscale mycluster --cpu=3 --memory=10Gi --components=broker,bookies -n demo
+   ```
+
+   - `--components` 表示可进行垂直扩容的组件名称。
+   - `--memory` 表示组件请求和限制的内存大小。
+   - `--cpu` 表示组件请求和限制的 CPU 大小。
 
 2. 验证垂直扩缩容。
 
-    ```bash
-    kbcli cluster list pulsar
-    ```
+    - 查看 OpsRequest 进度。
 
-   - STATUS=VerticalScaling 表示正在进行垂直扩容。
-   - STATUS=Running 表示垂直扩容已完成。
-   - STATUS=Abnormal 表示垂直扩容异常。原因可能是正常实例的数量少于总实例数，或者 Leader 实例正常运行而其他实例异常。
-     > 你可以手动检查是否由于资源不足而导致报错。如果 Kubernetes 集群支持 AutoScaling，系统在资源充足的情况下会执行自动恢复。或者你也可以创建足够的资源，并使用 `kubectl describe` 命令进行故障排除。
+       执行命令后，KubeBlocks 会自动输出查看 OpsRequest 进度的命令，可通过该命令查看 OpsRequest 进度的细节，包括 OpsRequest 的状态、Pod 状态等。当 OpsRequest 的状态为 `Succeed` 时，表明这一任务已完成。
+
+       ```bash
+       kbcli cluster describe-ops mycluster-verticalscaling-g67k9 -n demo
+       ```
+
+    - 查看集群状态。
+
+       - STATUS=VerticalScaling 表示正在进行垂直扩容。
+       - STATUS=Running 表示垂直扩容已完成。
+       - STATUS=Abnormal 表示垂直扩容异常。原因可能是正常实例的数量少于总实例数，或者 Leader 实例正常运行而其他实例异常。
+          > 您可以手动检查是否由于资源不足而导致报错。如果 Kubernetes 集群支持 AutoScaling，系统在资源充足的情况下会执行自动恢复。或者你也可以创建足够的资源，并使用 `kubectl describe` 命令进行故障排除。
 
     :::note
 
@@ -96,79 +193,186 @@ kbcli cluster list pulsar
 
     :::
 
-3. 检查资源是否已经发生更改。
+3. 当 OpsRequest 状态为 `Succeed` 或集群状态再次回到 `Running` 后，检查资源是否已经发生更改。
 
     ```bash
-    kbcli cluster describe pulsar
+    kbcli cluster describe mycluster -n demo
     ```
+
+</TabItem>
+
+</Tabs>
 
 ## 水平扩缩容
 
-水平扩缩容会改变 Pod 的数量。例如，你可以应用水平扩容将 Pod 的数量从三个增加到五个。扩容过程包括数据的备份和恢复。
+水平扩缩容会改变 Pod 的数量。例如，你可以应用水平扩容将 Pod 的数量从三个增加到五个。
+
+从 v0.9.0 开始，KubeBlocks 支持指定实例水平扩缩容，可参考 [水平扩缩容文档](./../../maintenance/scale/horizontal-scale.md)，查看详细介绍及示例。
 
 ### 开始之前
 
 - Zookeeper 建议固定 3 节点，无需扩缩容，其他可以针对多个或单个组件进行水平扩缩容。
 - 谨慎扩缩容 Bookies 节点。其数据复制与 EnsembleSize、Write Quorum 和 Ack Quorum 配置有关，扩缩容可能导致数据丢失。详细信息请查阅 [Pulsar 官方文档](https://pulsar.apahe.org/docs/3.0.x/administration-zk-bk/#decommission-bookies-cleanly)。
+- 确保集群处于 `Running` 状态，否则以下操作可能会失败。
+
+    <Tabs>
+
+    <TabItem value="kubectl" label="kubectl"  default>
+
+    ```bash
+    kubectl get cluster mycluster -n demo
+    ```
+
+    </TabItem>
+
+    <TabItem value="kbcli" label="kbcli">
+
+    ```bash
+    kbcli cluster list mycluster -n demo
+    ```
+
+    </TabItem>
+
+    </Tabs>
 
 ### 步骤
 
-1. 更改配置，共有 3 种方式。
+<Tabs>
 
-   **选项 1.** (**推荐**) 使用 kbcli
+<TabItem value="OpsRequest" label="OpsRequest" default>
 
-   配置参数 `--components` 和 `--replicas`，并执行以下命令。
+1. 对指定的集群应用 OpsRequest，可根据您的需求配置参数。
 
-   ```bash
-   kbcli cluster hscale pulsar --replicas=5 --components=broker,bookies                  Running        Jan 29,2023 14:29 UTC+0800
-   ```
-
-   - `--components` 表示准备进行水平扩容的组件名称。
-   - `--replicas` 表示指定组件的副本数。
-
-   **选项 2.** 创建 OpsRequest
-
-   可根据需求配置参数，将 OpsRequest 应用于指定的集群。
+   以下示例演示了增加 2 个副本。
 
     ```bash
     kubectl create -f -<< EOF
     apiVersion: apps.kubeblocks.io/v1alpha1
     kind: OpsRequest
     metadata:
-      generateName: pulsar-horizontalscaling-
+      name: ops-horizontalscaling
+      namespace: demo
     spec:
-      clusterRef: pulsar
+      clusterRef: mycluster
       type: HorizontalScaling  
       horizontalScaling:
-      - componentName: broker
-        replicas: 5
-      - componentName: bookies
-        replicas: 5
+      - componentName: pulsar-proxy
+        scaleOut:
+          replicaChanges: 2
     EOF
     ```
 
-   **选项 3.** 使用 `kubectl` 编辑 Pulsar 集群。
+   如果您想要缩容，可将 `scaleOut` 替换为 `scaleIn`。
+
+   以下示例演示了删除 2 个副本。
+
+    ```bash
+    kubectl create -f -<< EOF
+    apiVersion: apps.kubeblocks.io/v1alpha1
+    kind: OpsRequest
+    metadata:
+      name: ops-horizontalscaling
+      namespace: demo
+    spec:
+      clusterRef: mycluster
+      type: HorizontalScaling  
+      horizontalScaling:
+      - componentName: pulsar-proxy
+        scaleIn:
+          replicaChanges: 2
+    EOF
+    ```
+
+2. 查看运维任务状态，验证垂直扩缩容操作是否成功。
 
    ```bash
-   kubectl edit cluster pulsar
-   ```
-  
-2. 验证水平扩缩容。
-
-   检查集群状态，确定水平扩容的情况。
-
-   ```bash
-   kubectl get ops
+   kubectl get ops -n demo
    >
-   NAME                             TYPE               CLUSTER   STATUS    PROGRESS   AGE
-   pulsar-horizontalscaling-9lfvc   HorizontalScaling  pulsar    Succeed   3/3        8m49s
+   NAMESPACE   NAME                     TYPE                CLUSTER     STATUS    PROGRESS   AGE
+   demo        ops-horizontal-scaling   HorizontalScaling   mycluster   Succeed   3/3        6m
    ```
 
-3. 检查相关资源规格是否已变更。
+   如果有报错，可执行 `kubectl describe ops -n demo` 命令查看该运维操作的相关事件，协助排障。
+
+3. 当 OpsRequest 状态为 `Succeed` 或集群状态再次回到 `Running` 后，查看相应资源是否变更。
 
    ```bash
-   kbcli cluster describe mysql-cluster
+   kubectl describe cluster mycluster -n demo
    ```
+
+</TabItem>
+
+<TabItem value="编辑集群 YAML 文件" label="编辑集群 YAML 文件">
+
+1. 修改 YAML 文件中 `spec.componentSpecs.replicas` 的配置。`spec.componentSpecs.replicas` 定义了 pod 数量，修改该参数将触发集群水平扩缩容。
+
+   ```bash
+   kubectl edit cluster mycluster -n demo
+   ```
+
+   在编辑器中修改 `spec.componentSpecs.replicas` 的参数值。
+
+   ```yaml
+   ...
+   spec:
+     clusterDefinitionRef: pulsar
+     clusterVersionRef: pulsar-3.0.2
+     componentSpecs:
+     - name: pulsar
+       componentDefRef: pulsar-proxy
+       replicas: 2 # 修改该参数值
+   ...
+   ```
+
+2. 当集群状态再次回到 `Running` 后，查看相关资源是否变更。
+
+    ```bash
+    kubectl describe cluster mycluster -n demo
+    ```
+
+</TabItem>
+
+<TabItem value="kbcli" label="kbcli">
+
+1. 更改配置。
+
+   配置参数 `--components` 和 `--replicas`，并执行以下命令。
+
+   ```bash
+   kbcli cluster hscale mycluster --replicas=5 --components=broker,bookies -n demo 
+   ```
+
+   - `--components` 表示准备进行水平扩容的组件名称。
+   - `--replicas` 表示指定组件的副本数。
+  
+2. 验证水平扩容是否完成。
+
+    - 查看 OpsRequest 进度。
+
+       执行命令后，KubeBlocks 会自动输出查看 OpsRequest 进度的命令，可通过该命令查看 OpsRequest 进度的细节，包括 OpsRequest 的状态、Pod 状态等。当 OpsRequest 的状态为 `Succeed` 时，表明这一任务已完成。
+
+       ```bash
+       kbcli cluster describe-ops mycluster-horizontalscaling-ffp9p -n demo
+       ```
+
+    - 查看集群状态。
+
+       ```bash
+       kbcli cluster list mycluster -n demo
+       ```
+
+       - STATUS=Updating 表示正在进行水平扩容。
+       - STATUS=Running 表示水平扩容已完成。
+
+3. 当 OpsRequest 状态为 `Succeed` 或集群状态再次回到 `Running` 后，检查相关资源规格是否已变更。
+
+    ```bash
+    kbcli cluster describe mycluster -n demo
+    ```
+
+</TabItem>
+
+</Tabs>
 
 ### 处理快照异常
 
@@ -178,7 +382,7 @@ kbcli cluster list pulsar
 Status:
   conditions: 
   - lastTransitionTime: "2023-02-08T04:20:26Z"
-    message: VolumeSnapshot/mysql-cluster-mysql-scaling-dbqgp: Failed to set default snapshot
+    message: VolumeSnapshot/pulsar-pulsar-scaling-dbqgp: Failed to set default snapshot
       class with error cannot find default snapshot class
     reason: ApplyResourcesFailed
     status: "False"
@@ -211,9 +415,9 @@ Status:
 2. 删除错误的备份（volumesnapshot 由备份生成）和 volumesnapshot 资源。
 
    ```bash
-   kubectl delete backup -l app.kubernetes.io/instance=mysql-cluster
+   kubectl delete backup -l app.kubernetes.io/instance=pulsar
    
-   kubectl delete volumesnapshot -l app.kubernetes.io/instance=mysql-cluster
+   kubectl delete volumesnapshot -l app.kubernetes.io/instance=pulsar
    ```
 
 ***结果***

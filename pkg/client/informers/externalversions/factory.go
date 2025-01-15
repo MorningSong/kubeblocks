@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,7 +28,7 @@ import (
 	dataprotection "github.com/apecloud/kubeblocks/pkg/client/informers/externalversions/dataprotection"
 	extensions "github.com/apecloud/kubeblocks/pkg/client/informers/externalversions/extensions"
 	internalinterfaces "github.com/apecloud/kubeblocks/pkg/client/informers/externalversions/internalinterfaces"
-	storage "github.com/apecloud/kubeblocks/pkg/client/informers/externalversions/storage"
+	operations "github.com/apecloud/kubeblocks/pkg/client/informers/externalversions/operations"
 	workloads "github.com/apecloud/kubeblocks/pkg/client/informers/externalversions/workloads"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
@@ -46,6 +46,7 @@ type sharedInformerFactory struct {
 	lock             sync.Mutex
 	defaultResync    time.Duration
 	customResync     map[reflect.Type]time.Duration
+	transform        cache.TransformFunc
 
 	informers map[reflect.Type]cache.SharedIndexInformer
 	// startedInformers is used for tracking which informers have been started.
@@ -80,6 +81,14 @@ func WithTweakListOptions(tweakListOptions internalinterfaces.TweakListOptionsFu
 func WithNamespace(namespace string) SharedInformerOption {
 	return func(factory *sharedInformerFactory) *sharedInformerFactory {
 		factory.namespace = namespace
+		return factory
+	}
+}
+
+// WithTransform sets a transform on all informers.
+func WithTransform(transform cache.TransformFunc) SharedInformerOption {
+	return func(factory *sharedInformerFactory) *sharedInformerFactory {
+		factory.transform = transform
 		return factory
 	}
 }
@@ -188,6 +197,7 @@ func (f *sharedInformerFactory) InformerFor(obj runtime.Object, newFunc internal
 	}
 
 	informer = newFunc(f.client, resyncPeriod)
+	informer.SetTransform(f.transform)
 	f.informers[informerType] = informer
 
 	return informer
@@ -250,7 +260,7 @@ type SharedInformerFactory interface {
 	Apps() apps.Interface
 	Dataprotection() dataprotection.Interface
 	Extensions() extensions.Interface
-	Storage() storage.Interface
+	Operations() operations.Interface
 	Workloads() workloads.Interface
 }
 
@@ -266,8 +276,8 @@ func (f *sharedInformerFactory) Extensions() extensions.Interface {
 	return extensions.New(f, f.namespace, f.tweakListOptions)
 }
 
-func (f *sharedInformerFactory) Storage() storage.Interface {
-	return storage.New(f, f.namespace, f.tweakListOptions)
+func (f *sharedInformerFactory) Operations() operations.Interface {
+	return operations.New(f, f.namespace, f.tweakListOptions)
 }
 
 func (f *sharedInformerFactory) Workloads() workloads.Interface {

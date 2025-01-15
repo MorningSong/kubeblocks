@@ -1,10 +1,12 @@
+{{- if has "alertmanager-webhook-adaptor" .Values.autoInstalledAddons  }}
 apiVersion: extensions.kubeblocks.io/v1alpha1
 kind: Addon
 metadata:
   name: {{ include "addon.alertmanager-webhook-adaptor.name" . }}
   labels:
     {{- include "kubeblocks.labels" . | nindent 4 }}
-    "kubeblocks.io/provider": apecloud
+    "addon.kubeblocks.io/provider": apecloud
+    "addon.kubeblocks.io/version": "0.1.4"
   {{- if .Values.keepAddons }}
   annotations:
     helm.sh/resource-policy: keep
@@ -16,11 +18,7 @@ spec:
   helm:
     {{- include "kubeblocks.addonChartLocationURL" ( dict "name" "alertmanager-webhook-adaptor" "version" "0.1.4" "values" .Values) | indent 4 }}
     {{- include "kubeblocks.addonChartsImage" . | indent 4 }}
-
-    installOptions:
-      {{- if hasPrefix "oci://" .Values.addonChartLocationBase }}
-      version: 0.1.4
-      {{- end }}
+    {{- include "kubeblocks.addonHelmInstallOptions" (dict "version" "0.1.4" "values" .Values) | indent 4 }}
 
     installValues:
       configMapRefs:
@@ -50,3 +48,5 @@ spec:
 
   installable:
     autoInstall: {{ .Values.prometheus.enabled }}
+{{- end }}
+

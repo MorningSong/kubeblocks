@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -27,10 +27,12 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -45,6 +47,7 @@ import (
 	dperrors "github.com/apecloud/kubeblocks/pkg/dataprotection/errors"
 	dprestore "github.com/apecloud/kubeblocks/pkg/dataprotection/restore"
 	dptypes "github.com/apecloud/kubeblocks/pkg/dataprotection/types"
+	"github.com/apecloud/kubeblocks/pkg/dataprotection/utils"
 	viper "github.com/apecloud/kubeblocks/pkg/viperx"
 )
 
@@ -59,6 +62,8 @@ type RestoreReconciler struct {
 // +kubebuilder:rbac:groups=dataprotection.kubeblocks.io,resources=restores/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=dataprotection.kubeblocks.io,resources=restores/finalizers,verbs=update
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create;update;patch;delete
 
 func (r *RestoreReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	reqCtx := intctrlutil.RequestCtx{
@@ -86,7 +91,7 @@ func (r *RestoreReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	case "":
 		return r.newAction(reqCtx, restore)
 	case dpv1alpha1.RestorePhaseRunning:
-		return r.inProgressAction(reqCtx, restore)
+		return r.handleRunningPhase(reqCtx, restore)
 	case dpv1alpha1.RestorePhaseCompleted:
 		if err = r.deleteExternalResources(reqCtx, restore); err != nil {
 			return intctrlutil.RequeueWithError(err, reqCtx.Log, "")
@@ -97,7 +102,7 @@ func (r *RestoreReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *RestoreReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	return intctrlutil.NewControllerManagedBy(mgr).
 		For(&dpv1alpha1.Restore{}).
 		Owns(&batchv1.Job{}).
 		Watches(&batchv1.Job{}, handler.EnqueueRequestsFromMapFunc(r.parseRestoreJob)).
@@ -122,10 +127,74 @@ func (r *RestoreReconciler) parseRestoreJob(ctx context.Context, object client.O
 
 func (r *RestoreReconciler) deleteExternalResources(reqCtx intctrlutil.RequestCtx, restore *dpv1alpha1.Restore) error {
 	labels := map[string]string{dprestore.DataProtectionRestoreLabelKey: restore.Name}
-	if err := deleteRelatedJobs(reqCtx, r.Client, restore.Namespace, labels); err != nil {
-		return err
+
+	// use map to avoid duplicate deletion of the same namespace.
+	namespaces := map[string]sets.Empty{
+		restore.Namespace:                          {},
+		viper.GetString(constant.CfgKeyCtrlrMgrNS): {},
 	}
-	return deleteRelatedJobs(reqCtx, r.Client, viper.GetString(constant.CfgKeyCtrlrMgrNS), labels)
+
+	return deleteRelatedObjectList(reqCtx, r.Client, &batchv1.JobList{}, namespaces, labels)
+}
+
+func CheckBackupRepoForRestore(reqCtx intctrlutil.RequestCtx, cli client.Client, restore *dpv1alpha1.Restore) (string, error) {
+	backupName := restore.Spec.Backup.Name
+	backupNamespace := restore.Spec.Backup.Namespace
+	backup := &dpv1alpha1.Backup{}
+	if err := cli.Get(reqCtx.Ctx, types.NamespacedName{Namespace: backupNamespace, Name: backupName}, backup); err != nil {
+		if apierrors.IsNotFound(err) {
+			err = intctrlutil.NewFatalError(err.Error())
+		}
+		return "", err
+	}
+	if backup.Status.BackupRepoName == "" {
+		// The backup doesn't use backup repo.
+		return "", nil
+	}
+
+	restoreNamespace := restore.Namespace
+	repoName := backup.Status.BackupRepoName
+	repo := &dpv1alpha1.BackupRepo{}
+	if err := cli.Get(reqCtx.Ctx, client.ObjectKey{Name: repoName}, repo); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", intctrlutil.NewFatalError(fmt.Sprintf("backup repo %s not found", repoName))
+		}
+		return repoName, err
+	}
+	if repo.Status.Phase != dpv1alpha1.BackupRepoReady {
+		return repoName, dperrors.NewBackupRepoIsNotReady(repo.Name)
+	}
+	switch {
+	case repo.AccessByMount():
+		pvcName := repo.Status.BackupPVCName
+		if pvcName == "" {
+			return repoName, intctrlutil.NewFatalError(fmt.Sprintf("BackupPVCName is empty in BackupRepo %s", repoName))
+		}
+		pvc := &corev1.PersistentVolumeClaim{}
+		pvcKey := client.ObjectKey{Namespace: restoreNamespace, Name: pvcName}
+		if err := cli.Get(reqCtx.Ctx, pvcKey, pvc); err != nil {
+			if apierrors.IsNotFound(err) {
+				return repoName, intctrlutil.NewErrorf(dperrors.ErrorTypeWaitForBackupRepoPreparation,
+					"backup repo %s is not ready in the namespace %s", repoName, restoreNamespace)
+			}
+			return repoName, err
+		}
+	case repo.AccessByTool():
+		toolConfigSecretName := repo.Status.ToolConfigSecretName
+		if toolConfigSecretName == "" {
+			return repoName, intctrlutil.NewFatalError(fmt.Sprintf("ToolConfigSecretName is empty in BackupRepo %s", repoName))
+		}
+		secret := &corev1.Secret{}
+		secretKey := client.ObjectKey{Namespace: restoreNamespace, Name: toolConfigSecretName}
+		if err := cli.Get(reqCtx.Ctx, secretKey, secret); err != nil {
+			if apierrors.IsNotFound(err) {
+				return repoName, intctrlutil.NewErrorf(dperrors.ErrorTypeWaitForBackupRepoPreparation,
+					"backup repo %s is not ready in the namespace %s", repoName, restoreNamespace)
+			}
+			return repoName, err
+		}
+	}
+	return repoName, nil
 }
 
 func (r *RestoreReconciler) newAction(reqCtx intctrlutil.RequestCtx, restore *dpv1alpha1.Restore) (ctrl.Result, error) {
@@ -138,17 +207,50 @@ func (r *RestoreReconciler) newAction(reqCtx intctrlutil.RequestCtx, restore *dp
 	if _, ok := restore.Labels[constant.AppManagedByLabelKey]; !ok {
 		restore.Labels[constant.AppManagedByLabelKey] = dptypes.AppName
 	}
+	waitBackupRepo := false
+	repoName, err := CheckBackupRepoForRestore(reqCtx, r.Client, restore)
+	switch {
+	case intctrlutil.IsTargetError(err, intctrlutil.ErrorTypeFatal):
+		dprestore.SetRestoreCheckBackupRepoCondition(restore, dprestore.ReasonCheckBackupRepoFailed, err.Error())
+		restore.Status.Phase = dpv1alpha1.RestorePhaseFailed
+		restore.Status.CompletionTimestamp = &metav1.Time{Time: time.Now()}
+		r.Recorder.Event(restore, corev1.EventTypeWarning, dprestore.ReasonRestoreFailed, err.Error())
+	case intctrlutil.IsTargetError(err, dperrors.ErrorTypeWaitForBackupRepoPreparation):
+		dprestore.SetRestoreCheckBackupRepoCondition(restore, dprestore.ReasonWaitForBackupRepo, err.Error())
+		waitBackupRepo = true
+		restore.Labels[dataProtectionBackupRepoKey] = repoName
+		restore.Labels[dataProtectionWaitRepoPreparationKey] = trueVal
+	case err != nil:
+		dprestore.SetRestoreCheckBackupRepoCondition(restore, ReasonUnknownError, err.Error())
+		sendWarningEventForError(r.Recorder, restore, err)
+		if patchErr := r.Client.Status().Patch(reqCtx.Ctx, restore, patch); patchErr != nil {
+			return intctrlutil.CheckedRequeueWithError(patchErr, reqCtx.Log, "")
+		}
+		return intctrlutil.RequeueWithError(err, reqCtx.Log, "")
+	default:
+		dprestore.SetRestoreCheckBackupRepoCondition(restore, dprestore.ReasonCheckBackupRepoSuccessfully, "")
+	}
 	if !reflect.DeepEqual(restore.ObjectMeta, oldRestore.ObjectMeta) {
 		if err := r.Client.Patch(reqCtx.Ctx, restore, patch); err != nil {
 			return intctrlutil.CheckedRequeueWithError(err, reqCtx.Log, "")
 		}
 		return intctrlutil.Reconciled()
 	}
+	if waitBackupRepo {
+		// If Restore and Backup are not in the same namespace, the backup repo may not
+		// be available in the Restore's namespace. We need to wait for the BackupRepoController
+		// to reconcile in such cases.
+		// We don't use requeue here because after the BackupRepoController reconciles,
+		// it removes relevant labels from the Restore resource, which in turn triggers
+		// reconciliation for the Restore resource.
+		return intctrlutil.Reconciled()
+	}
+
 	if restore.Spec.PrepareDataConfig != nil && restore.Spec.PrepareDataConfig.DataSourceRef != nil {
 		restore.Status.Phase = dpv1alpha1.RestorePhaseAsDataSource
 	} else {
 		// check if restore CR is legal
-		err := dprestore.ValidateAndInitRestoreMGR(reqCtx, r.Client, dprestore.NewRestoreManager(restore, r.Recorder, r.Scheme))
+		err := r.validateAndBuildMGR(reqCtx, dprestore.NewRestoreManager(restore, r.Recorder, r.Scheme))
 		switch {
 		case intctrlutil.IsTargetError(err, intctrlutil.ErrorTypeFatal):
 			restore.Status.Phase = dpv1alpha1.RestorePhaseFailed
@@ -168,13 +270,17 @@ func (r *RestoreReconciler) newAction(reqCtx intctrlutil.RequestCtx, restore *dp
 	return intctrlutil.Reconciled()
 }
 
-func (r *RestoreReconciler) inProgressAction(reqCtx intctrlutil.RequestCtx, restore *dpv1alpha1.Restore) (ctrl.Result, error) {
+func (r *RestoreReconciler) handleRunningPhase(reqCtx intctrlutil.RequestCtx, restore *dpv1alpha1.Restore) (ctrl.Result, error) {
 	restoreMgr := dprestore.NewRestoreManager(restore, r.Recorder, r.Scheme)
 	// validate if the restore.spec is valid and build restore manager.
 	err := r.validateAndBuildMGR(reqCtx, restoreMgr)
-	// skip processing for ErrorTypeWaitForExternalHandler when Restore is Running
-	if intctrlutil.IsTargetError(err, dperrors.ErrorTypeWaitForExternalHandler) {
-		return intctrlutil.Reconciled()
+	if err == nil {
+		saName := restore.Spec.ServiceAccountName
+		if saName == "" {
+			// TODO: update the mcMgr param
+			saName, err = EnsureWorkerServiceAccount(reqCtx, r.Client, restore.Namespace, nil)
+		}
+		restoreMgr.WorkerServiceAccount = saName
 	}
 	if err == nil {
 		// handle restore actions
@@ -200,6 +306,7 @@ func (r *RestoreReconciler) inProgressAction(reqCtx intctrlutil.RequestCtx, rest
 }
 
 func (r *RestoreReconciler) HandleRestoreActions(reqCtx intctrlutil.RequestCtx, restoreMgr *dprestore.RestoreManager) error {
+	reqCtx.Log.V(1).Info("start to prepare data", "restore", reqCtx.Req.NamespacedName)
 	// 1. handle the prepareData stage.
 	isCompleted, err := r.prepareData(reqCtx, restoreMgr)
 	if err != nil {
@@ -209,6 +316,7 @@ func (r *RestoreReconciler) HandleRestoreActions(reqCtx intctrlutil.RequestCtx, 
 	if !isCompleted {
 		return nil
 	}
+	reqCtx.Log.V(1).Info("start to restore data after ready", "restore", reqCtx.Req.NamespacedName)
 	// 2. handle the postReady stage.
 	isCompleted, err = r.postReady(reqCtx, restoreMgr)
 	if err != nil {
@@ -315,6 +423,10 @@ func (r *RestoreReconciler) handleBackupActionSet(reqCtx intctrlutil.RequestCtx,
 	backupSet dprestore.BackupActionSet,
 	stage dpv1alpha1.RestoreStage,
 	step int) (bool, error) {
+	target := utils.GetBackupStatusTarget(backupSet.Backup, restoreMgr.Restore.Spec.Backup.SourceTargetName)
+	if target == nil {
+		return false, intctrlutil.NewFatalError("can not found any source targe in backup " + backupSet.Backup.Name)
+	}
 	handleFailed := func(restore *dpv1alpha1.Restore, backupName string) error {
 		errorMsg := fmt.Sprintf(`restore failed for backup "%s", more information can be found in status.actions.%s`, backupName, stage)
 		dprestore.SetRestoreStageCondition(restore, stage, dprestore.ReasonFailed, errorMsg)
@@ -343,14 +455,14 @@ func (r *RestoreReconciler) handleBackupActionSet(reqCtx intctrlutil.RequestCtx,
 	switch stage {
 	case dpv1alpha1.PrepareData:
 		if backupSet.UseVolumeSnapshot {
-			if err = restoreMgr.RestorePVCFromSnapshot(reqCtx, r.Client, backupSet); err != nil {
+			if err = restoreMgr.RestorePVCFromSnapshot(reqCtx, r.Client, backupSet, target); err != nil {
 				return false, nil
 			}
 		}
-		jobs, err = restoreMgr.BuildPrepareDataJobs(reqCtx, r.Client, backupSet, actionName)
+		jobs, err = restoreMgr.BuildPrepareDataJobs(reqCtx, r.Client, backupSet, target, actionName)
 	case dpv1alpha1.PostReady:
 		// 2. build jobs for postReady action
-		jobs, err = restoreMgr.BuildPostReadyActionJobs(reqCtx, r.Client, backupSet, step)
+		jobs, err = restoreMgr.BuildPostReadyActionJobs(reqCtx, r.Client, backupSet, target, step)
 	}
 	if err != nil {
 		return false, err

@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -28,11 +28,7 @@ type PlanBuilder interface {
 	// And the transformers will be executed in the add order.
 	AddTransformer(transformer ...Transformer) PlanBuilder
 
-	// AddParallelTransformer adds transformers to the builder.
-	// And the transformers will be executed in parallel.
-	AddParallelTransformer(transformer ...Transformer) PlanBuilder
-
-	// Build runs all the transformers added by AddTransformer and/or AddParallelTransformer.
+	// Build runs all the transformers added by AddTransformer.
 	Build() (Plan, error)
 }
 

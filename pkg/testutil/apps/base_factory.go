@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -104,8 +104,8 @@ func (factory *BaseFactory[T, PT, F]) AddAppManagedByLabel() *F {
 	return factory.AddLabels(constant.AppManagedByLabelKey, constant.AppName)
 }
 
-func (factory *BaseFactory[T, PT, F]) AddConsensusSetAccessModeLabel(value string) *F {
-	return factory.AddLabels(constant.ConsensusSetAccessModeLabelKey, value)
+func (factory *BaseFactory[T, PT, F]) AddAccessModeLabel(value string) *F {
+	return factory.AddLabels(constant.AccessModeLabelKey, value)
 }
 
 func (factory *BaseFactory[T, PT, F]) AddRoleLabel(value string) *F {

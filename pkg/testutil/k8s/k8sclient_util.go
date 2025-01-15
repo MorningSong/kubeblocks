@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -115,7 +115,7 @@ func (helper *K8sClientMockHelper) MockStatusMethod() *mock_client.MockStatusWri
 func (helper *K8sClientMockHelper) MockGetMethod(options ...any) {
 	helper.getCaller.Caller(func() (CallerFunction, DoReturnedFunction) {
 		caller := func() *gomock.Call {
-			return helper.k8sClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any())
+			return helper.k8sClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any())
 		}
 		doAndReturn := func(caller *gomock.Call, fnWrap HandleGetReturnedObject) {
 			caller.DoAndReturn(func(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
@@ -130,7 +130,7 @@ func (helper *K8sClientMockHelper) MockGetMethod(options ...any) {
 func (helper *K8sClientMockHelper) MockCreateMethod(options ...any) {
 	helper.createCaller.Caller(func() (CallerFunction, DoReturnedFunction) {
 		caller := func() *gomock.Call {
-			return helper.k8sClient.EXPECT().Create(gomock.Any(), gomock.Any())
+			return helper.k8sClient.EXPECT().Create(gomock.Any(), gomock.Any(), gomock.Any())
 		}
 		doAndReturn := func(caller *gomock.Call, fnWrap func(obj client.Object) error) {
 			caller.DoAndReturn(func(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
@@ -145,7 +145,7 @@ func (helper *K8sClientMockHelper) MockCreateMethod(options ...any) {
 func (helper *K8sClientMockHelper) MockUpdateMethod(options ...any) {
 	helper.updateCaller.Caller(func() (CallerFunction, DoReturnedFunction) {
 		caller := func() *gomock.Call {
-			return helper.k8sClient.EXPECT().Update(gomock.Any(), gomock.Any())
+			return helper.k8sClient.EXPECT().Update(gomock.Any(), gomock.Any(), gomock.Any())
 		}
 		doAndReturn := func(caller *gomock.Call, fnWrap func(obj client.Object) error) {
 			caller.DoAndReturn(func(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {

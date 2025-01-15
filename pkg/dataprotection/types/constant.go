@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -25,6 +25,16 @@ const AppName = "kubeblocks-dataprotection"
 const (
 	// CfgKeyGCFrequencySeconds is the key of gc frequency, its unit is second
 	CfgKeyGCFrequencySeconds = "GC_FREQUENCY_SECONDS"
+	// CfgKeyWorkerServiceAccountName is the key of service account name for worker
+	CfgKeyWorkerServiceAccountName = "WORKER_SERVICE_ACCOUNT_NAME"
+	// CfgKeyExecWorkerServiceAccountName is the key of service account name for worker that runs "kubectl exec"
+	CfgKeyExecWorkerServiceAccountName = "EXEC_WORKER_SERVICE_ACCOUNT_NAME"
+	// CfgKeyWorkerServiceAccountAnnotations is the key of annotations for the service account of the worker
+	CfgKeyWorkerServiceAccountAnnotations = "WORKER_SERVICE_ACCOUNT_ANNOTATIONS"
+	// CfgKeyWorkerClusterRoleName is the key of cluster role name for binding the service account of the worker
+	CfgKeyWorkerClusterRoleName = "WORKER_CLUSTER_ROLE_NAME"
+	// CfgDataProtectionReconcileWorkers the max reconcile workers for MaxConcurrentReconciles
+	CfgDataProtectionReconcileWorkers = "DATAPROTECTION_RECONCILE_WORKERS"
 )
 
 // config default values
@@ -48,6 +58,10 @@ const (
 	DefaultBackupRepoAnnotationKey = "dataprotection.kubeblocks.io/is-default-repo"
 	// ReconfigureRefAnnotationKey specifies the reconfigure ref.
 	ReconfigureRefAnnotationKey = "dataprotection.kubeblocks.io/reconfigure-ref"
+	// ConnectionPasswordAnnotationKey specifies the password of the connection credential.
+	ConnectionPasswordAnnotationKey = "dataprotection.kubeblocks.io/connection-password"
+	// GeminiAcknowledgedAnnotationKey indicates whether Gemini has acknowledged the backup.
+	GeminiAcknowledgedAnnotationKey = "dataprotection.kubeblocks.io/gemini-acknowledged"
 )
 
 // label keys
@@ -70,8 +84,6 @@ const (
 	AutoBackupLabelKey = "dataprotection.kubeblocks.io/autobackup"
 	// BackupTargetPodLabelKey specifies the backup target pod label key.
 	BackupTargetPodLabelKey = "dataprotection.kubeblocks.io/target-pod-name"
-	// ConnectionPasswordKey specifies the password of the connection credential.
-	ConnectionPasswordKey = "dataprotection.kubeblocks.io/connection-password"
 )
 
 // env names
@@ -88,10 +100,26 @@ const (
 	DPDBPort = "DP_DB_PORT"
 	// DPTargetPodName the target pod name
 	DPTargetPodName = "DP_TARGET_POD_NAME"
+	// DPTargetPodRole the target pod role
+	DPTargetPodRole = "DP_TARGET_POD_ROLE"
 	// DPBackupBasePath the base path for backup data in the storage
+	// In a backup action pod, it equals ${DP_BACKUP_ROOT_PATH}/${DP_BACKUP_NAME}/${DP_TARGET_RELATIVE_PATH}
 	DPBackupBasePath = "DP_BACKUP_BASE_PATH"
+	// DPBackupRootPath the root path for backup data
+	DPBackupRootPath = "DP_BACKUP_ROOT_PATH"
+	// DPTargetRelativePath the relative path based on the backup data root path
+	// ${DP_TARGET_RELATIVE_PATH}=${target.name}/${target.selectedTargetPod[*]}
+	DPTargetRelativePath = "DP_TARGET_RELATIVE_PATH"
 	// DPBackupName backup CR name
 	DPBackupName = "DP_BACKUP_NAME"
+	// DPParentBackupName backup CR name
+	DPParentBackupName = "DP_PARENT_BACKUP_NAME"
+	// DPBaseBackupName backup CR name
+	DPBaseBackupName = "DP_BASE_BACKUP_NAME"
+	// DPAncestorIncrementalBackupNames backup CR names
+	// Used to restore incremental backups, recording the incremental ancestor backup names in order of end time
+	// For example: ${DP_ANCESTOR_INCREMENTAL_BACKUP_NAMES}=incrementalBackupName1,incrementalBackupName2,incrementalBackupName3
+	DPAncestorIncrementalBackupNames = "DP_ANCESTOR_INCREMENTAL_BACKUP_NAMES"
 	// DPTTL backup time to live, reference the backup.spec.retentionPeriod
 	DPTTL = "DP_TTL"
 	// DPCheckInterval check interval for sync backup progress
@@ -100,16 +128,35 @@ const (
 	DPBackupInfoFile = "DP_BACKUP_INFO_FILE"
 	// DPTimeFormat golang time format string
 	DPTimeFormat = "DP_TIME_FORMAT"
+	// DPTimeZone golang time zone string
+	DPTimeZone = "DP_TIME_ZONE"
 	// DPBackupStopTime backup stop time
 	DPBackupStopTime = "DP_BACKUP_STOP_TIME" // backup stop time
 	// DPDatasafedBinPath the path containing the datasafed binary
 	DPDatasafedBinPath = "DP_DATASAFED_BIN_PATH"
+
+	// NOTE: do not add 'DP_' prefix to the value of the following constants, they are the datasafed built-in environment.
+
 	// DPDatasafedLocalBackendPath force datasafed to use local backend with the path
-	// NOTE: do not add 'DP_' for this constant, it is the datasafed built-in environment.
 	DPDatasafedLocalBackendPath = "DATASAFED_LOCAL_BACKEND_PATH"
+	// DPDatasafedKopiaRepoRoot specifies the root of the Kopia repository
+	DPDatasafedKopiaRepoRoot = "DATASAFED_KOPIA_REPO_ROOT"
+	// DPDatasafedEncryptionAlgorithm specifies the encryption algorithm for backup data
+	DPDatasafedEncryptionAlgorithm = "DATASAFED_ENCRYPTION_ALGORITHM"
+	// DPDatasafedEncryptionPassPhrase specifies the encryption key
+	DPDatasafedEncryptionPassPhrase = "DATASAFED_ENCRYPTION_PASS_PHRASE"
+
+	DPArchiveInterval      = "DP_ARCHIVE_INTERVAL"
+	DPContinuousTTLSeconds = "DP_TTL_SECONDS"
 )
 
 const (
+	BackupKind             = "Backup"
 	RestoreKind            = "Restore"
 	DataprotectionAPIGroup = "dataprotection.kubeblocks.io"
+	KopiaRepoFolderName    = "kopia"
+)
+
+const (
+	LogCollectorOutput = "Log Collector Output"
 )

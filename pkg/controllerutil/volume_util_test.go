@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -20,20 +20,26 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 package controllerutil
 
 import (
+	"reflect"
+	"testing"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 
-	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
+	kbappsv1 "github.com/apecloud/kubeblocks/apis/apps/v1"
+	cfgutil "github.com/apecloud/kubeblocks/pkg/configuration/util"
+	"github.com/apecloud/kubeblocks/pkg/constant"
+	viper "github.com/apecloud/kubeblocks/pkg/viperx"
 )
 
 var _ = Describe("lifecycle_utils", func() {
 
 	Context("has the checkAndUpdatePodVolumes function which generates Pod Volumes for mounting ConfigMap objects", func() {
 		var sts appsv1.StatefulSet
-		var volumes map[string]appsv1alpha1.ComponentTemplateSpec
+		var volumes map[string]kbappsv1.ComponentTemplateSpec
 		BeforeEach(func() {
 			sts = appsv1.StatefulSet{
 				Spec: appsv1.StatefulSetSpec{
@@ -64,42 +70,42 @@ var _ = Describe("lifecycle_utils", func() {
 					},
 				},
 			}
-			volumes = make(map[string]appsv1alpha1.ComponentTemplateSpec)
+			volumes = make(map[string]kbappsv1.ComponentTemplateSpec)
 
 		})
 
 		It("should succeed in corner case where input volumes is nil, which means no volume is added", func() {
 			ps := &sts.Spec.Template.Spec
-			err := CreateOrUpdatePodVolumes(ps, volumes)
+			err := CreateOrUpdatePodVolumes(ps, volumes, nil)
 			Expect(err).Should(BeNil())
 			Expect(len(ps.Volumes)).To(Equal(1))
 		})
 
 		It("should succeed in normal test case, where one volume is added", func() {
-			volumes["my_config"] = appsv1alpha1.ComponentTemplateSpec{
+			volumes["my_config"] = kbappsv1.ComponentTemplateSpec{
 				Name:        "myConfig",
 				TemplateRef: "myConfig",
 				VolumeName:  "myConfigVolume",
 			}
 			ps := &sts.Spec.Template.Spec
-			err := CreateOrUpdatePodVolumes(ps, volumes)
+			err := CreateOrUpdatePodVolumes(ps, volumes, nil)
 			Expect(err).Should(BeNil())
 			Expect(len(ps.Volumes)).To(Equal(2))
 		})
 
 		It("should succeed in normal test case, where two volumes are added", func() {
-			volumes["my_config"] = appsv1alpha1.ComponentTemplateSpec{
+			volumes["my_config"] = kbappsv1.ComponentTemplateSpec{
 				Name:        "myConfig",
 				TemplateRef: "myConfig",
 				VolumeName:  "myConfigVolume",
 			}
-			volumes["my_config1"] = appsv1alpha1.ComponentTemplateSpec{
+			volumes["my_config1"] = kbappsv1.ComponentTemplateSpec{
 				Name:        "myConfig",
 				TemplateRef: "myConfig",
 				VolumeName:  "myConfigVolume2",
 			}
 			ps := &sts.Spec.Template.Spec
-			err := CreateOrUpdatePodVolumes(ps, volumes)
+			err := CreateOrUpdatePodVolumes(ps, volumes, nil)
 			Expect(err).Should(BeNil())
 			Expect(len(ps.Volumes)).To(Equal(3))
 		})
@@ -116,13 +122,13 @@ var _ = Describe("lifecycle_utils", func() {
 						EmptyDir: &corev1.EmptyDirVolumeSource{},
 					},
 				})
-			volumes[cmName] = appsv1alpha1.ComponentTemplateSpec{
+			volumes[cmName] = kbappsv1.ComponentTemplateSpec{
 				Name:        "configTplName",
 				TemplateRef: "configTplName",
 				VolumeName:  replicaVolumeName,
 			}
 			ps := &sts.Spec.Template.Spec
-			Expect(CreateOrUpdatePodVolumes(ps, volumes)).ShouldNot(Succeed())
+			Expect(CreateOrUpdatePodVolumes(ps, volumes, nil)).ShouldNot(Succeed())
 		})
 
 		It("should succeed if updated volume contains ConfigMap", func() {
@@ -142,13 +148,13 @@ var _ = Describe("lifecycle_utils", func() {
 					},
 				})
 
-			volumes[cmName] = appsv1alpha1.ComponentTemplateSpec{
+			volumes[cmName] = kbappsv1.ComponentTemplateSpec{
 				Name:        "configTplName",
 				TemplateRef: "configTplName",
 				VolumeName:  replicaVolumeName,
 			}
 			ps := &sts.Spec.Template.Spec
-			err := CreateOrUpdatePodVolumes(ps, volumes)
+			err := CreateOrUpdatePodVolumes(ps, volumes, nil)
 			Expect(err).Should(BeNil())
 			Expect(len(sts.Spec.Template.Spec.Volumes)).To(Equal(2))
 			volume := GetVolumeMountName(sts.Spec.Template.Spec.Volumes, cmName)
@@ -160,3 +166,61 @@ var _ = Describe("lifecycle_utils", func() {
 
 	})
 })
+
+func Test_buildVolumeMode(t *testing.T) {
+	type args struct {
+		configs    []string
+		configSpec kbappsv1.ComponentTemplateSpec
+	}
+	tests := []struct {
+		name string
+		args args
+		want *int32
+	}{{
+		name: "config_test",
+		args: args{
+			configs: []string{"config1", "config2"},
+			configSpec: kbappsv1.ComponentTemplateSpec{
+				Name:        "config1",
+				DefaultMode: cfgutil.ToPointer(int32(0777)),
+			},
+		},
+		want: cfgutil.ToPointer(int32(0777)),
+	}, {
+		name: "config_test2",
+		args: args{
+			configs: []string{"config1", "config2"},
+			configSpec: kbappsv1.ComponentTemplateSpec{
+				Name: "config1",
+			},
+		},
+		want: cfgutil.ToPointer(configsDefaultMode),
+	}, {
+		name: "script_test",
+		args: args{
+			configs: []string{"config1", "config2"},
+			configSpec: kbappsv1.ComponentTemplateSpec{
+				Name:        "script",
+				DefaultMode: cfgutil.ToPointer(int32(0777)),
+			},
+		},
+		want: cfgutil.ToPointer(int32(0777)),
+	}, {
+		name: "script_test2",
+		args: args{
+			configs: []string{"config1", "config2"},
+			configSpec: kbappsv1.ComponentTemplateSpec{
+				Name: "script",
+			},
+		},
+		want: cfgutil.ToPointer(scriptsDefaultMode),
+	}}
+	viper.Set(constant.FeatureGateIgnoreConfigTemplateDefaultMode, false)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := BuildVolumeMode(tt.args.configs, tt.args.configSpec); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("BuildVolumeMode() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

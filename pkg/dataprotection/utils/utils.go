@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -26,9 +26,8 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
-	"strings"
-	"unicode"
 
+	"github.com/rogpeppe/go-internal/semver"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -40,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	dpv1alpha1 "github.com/apecloud/kubeblocks/apis/dataprotection/v1alpha1"
+	"github.com/apecloud/kubeblocks/pkg/common"
 	"github.com/apecloud/kubeblocks/pkg/constant"
 	intctrlutil "github.com/apecloud/kubeblocks/pkg/controllerutil"
 	dptypes "github.com/apecloud/kubeblocks/pkg/dataprotection/types"
@@ -86,12 +86,18 @@ func IsJobFinished(job *batchv1.Job) (bool, batchv1.JobConditionType, string) {
 	return false, "", ""
 }
 
-func GetAssociatedPodsOfJob(ctx context.Context, cli client.Client, namespace, jobName string) (*corev1.PodList, error) {
+func GetAssociatedPodsOfJob(ctx context.Context, cli client.Client, namespace, jobName string, opts ...client.ListOption) (*corev1.PodList, error) {
 	podList := &corev1.PodList{}
 	// from https://github.com/kubernetes/kubernetes/issues/24709
-	err := cli.List(ctx, podList, client.InNamespace(namespace), client.MatchingLabels{
-		"job-name": jobName,
-	})
+	opts = append(
+		[]client.ListOption{
+			client.InNamespace(namespace),
+			client.MatchingLabels{
+				"job-name": jobName,
+			},
+		},
+		opts...)
+	err := cli.List(ctx, podList, opts...)
 	return podList, err
 }
 
@@ -105,8 +111,7 @@ func RemoveDataProtectionFinalizer(ctx context.Context, cli client.Client, obj c
 }
 
 // GetActionSetByName gets the ActionSet by name.
-func GetActionSetByName(reqCtx intctrlutil.RequestCtx,
-	cli client.Client, name string) (*dpv1alpha1.ActionSet, error) {
+func GetActionSetByName(reqCtx intctrlutil.RequestCtx, cli client.Client, name string) (*dpv1alpha1.ActionSet, error) {
 	if name == "" {
 		return nil, nil
 	}
@@ -118,10 +123,7 @@ func GetActionSetByName(reqCtx intctrlutil.RequestCtx,
 	return as, nil
 }
 
-func GetBackupPolicyByName(
-	reqCtx intctrlutil.RequestCtx,
-	cli client.Client,
-	name string) (*dpv1alpha1.BackupPolicy, error) {
+func GetBackupPolicyByName(reqCtx intctrlutil.RequestCtx, cli client.Client, name string) (*dpv1alpha1.BackupPolicy, error) {
 	backupPolicy := &dpv1alpha1.BackupPolicy{}
 	key := client.ObjectKey{
 		Namespace: reqCtx.Req.Namespace,
@@ -134,9 +136,9 @@ func GetBackupPolicyByName(
 }
 
 func GetBackupMethodByName(name string, backupPolicy *dpv1alpha1.BackupPolicy) *dpv1alpha1.BackupMethod {
-	for _, m := range backupPolicy.Spec.BackupMethods {
+	for i, m := range backupPolicy.Spec.BackupMethods {
 		if m.Name == name {
-			return &m
+			return &backupPolicy.Spec.BackupMethods[i]
 		}
 	}
 	return nil
@@ -144,8 +146,8 @@ func GetBackupMethodByName(name string, backupPolicy *dpv1alpha1.BackupPolicy) *
 
 func GetPodListByLabelSelector(reqCtx intctrlutil.RequestCtx,
 	cli client.Client,
-	labelSelector metav1.LabelSelector) (*corev1.PodList, error) {
-	selector, err := metav1.LabelSelectorAsSelector(&labelSelector)
+	labelSelector *metav1.LabelSelector) (*corev1.PodList, error) {
+	selector, err := metav1.LabelSelectorAsSelector(labelSelector)
 	if err != nil {
 		return nil, err
 	}
@@ -158,7 +160,11 @@ func GetPodListByLabelSelector(reqCtx intctrlutil.RequestCtx,
 	return targetPodList, nil
 }
 
-func GetBackupVolumeSnapshotName(backupName, volumeSource string) string {
+func GetBackupVolumeSnapshotName(backupName, volumeSource string, index int) string {
+	return fmt.Sprintf("%s-%d-%s", backupName, index, volumeSource)
+}
+
+func GetOldBackupVolumeSnapshotName(backupName, volumeSource string) string {
 	return fmt.Sprintf("%s-%s", backupName, volumeSource)
 }
 
@@ -208,7 +214,7 @@ func VolumeSnapshotEnabled(ctx context.Context, cli client.Client, pod *corev1.P
 		if err := cli.Get(ctx, types.NamespacedName{Name: pvcNames[i], Namespace: pod.Namespace}, pvc); err != nil {
 			return false, nil
 		}
-		enabled, err := intctrlutil.IsVolumeSnapshotEnabled(ctx, cli, pvc.Spec.VolumeName)
+		enabled, err := IsVolumeSnapshotEnabled(ctx, cli, pvc.Spec.VolumeName)
 		if err != nil {
 			return false, err
 		}
@@ -245,6 +251,19 @@ func GetBackupType(actionSet *dpv1alpha1.ActionSet, useSnapshot *bool) dpv1alpha
 		return dpv1alpha1.BackupTypeFull
 	}
 	return ""
+}
+
+func GetBackupTypeByMethodName(reqCtx intctrlutil.RequestCtx, cli client.Client, methodName string,
+	backupPolicy *dpv1alpha1.BackupPolicy) (dpv1alpha1.BackupType, error) {
+	backupMethod := GetBackupMethodByName(methodName, backupPolicy)
+	if backupMethod == nil {
+		return "", nil
+	}
+	actionSet, err := GetActionSetByName(reqCtx, cli, backupMethod.ActionSetName)
+	if err != nil {
+		return "", err
+	}
+	return GetBackupType(actionSet, backupMethod.SnapshotVolumes), nil
 }
 
 // PrependSpaces prepends spaces to each line of the content.
@@ -285,31 +304,166 @@ func GetFirstIndexRunningPod(podList *corev1.PodList) *corev1.Pod {
 	return nil
 }
 
-// GetKubeVersion get the version of Kubernetes and return the version major and minor
-func GetKubeVersion() (int, int, error) {
-	var err error
-	verIf := viper.Get(constant.CfgKeyServerInfo)
-	ver, ok := verIf.(version.Info)
+func GetPodByName(podList *corev1.PodList, name string) *corev1.Pod {
+	if podList == nil {
+		return nil
+	}
+	for i, v := range podList.Items {
+		if v.Name == name {
+			return &podList.Items[i]
+		}
+	}
+	return nil
+}
+
+// GetKubeVersion get the version of Kubernetes and return the gitVersion
+func GetKubeVersion() (string, error) {
+	verInfo := viper.Get(constant.CfgKeyServerInfo)
+	ver, ok := verInfo.(version.Info)
 	if !ok {
-		return 0, 0, fmt.Errorf("failed to get kubernetes version, major %s, minor %s", ver.Major, ver.Minor)
+		return "", fmt.Errorf("failed to get kubernetes version, version info %v", verInfo)
 	}
+	if !semver.IsValid(ver.GitVersion) {
+		return "", fmt.Errorf("kubernetes version is not a valid semver, version info %v", verInfo)
+	}
+	return semver.MajorMinor(ver.GitVersion), nil
+}
 
-	major, err := strconv.Atoi(ver.Major)
+func SupportsCronJobV1() bool {
+	kubeVersion, err := GetKubeVersion()
 	if err != nil {
-		return 0, 0, err
+		return true
 	}
+	return semver.Compare(kubeVersion, "v1.21") >= 0
+}
 
-	// split the "normal" + and - for semver stuff to get the leading minor number
-	minorStrs := strings.FieldsFunc(ver.Minor, func(r rune) bool {
-		return !unicode.IsDigit(r)
-	})
-	if len(minorStrs) == 0 {
-		return 0, 0, fmt.Errorf("failed to get kubernetes version, major %s, minor %s", ver.Major, ver.Minor)
+func GetPodFirstContainerPort(pod *corev1.Pod) int32 {
+	ports := pod.Spec.Containers[0].Ports
+	if len(ports) == 0 {
+		return 0
 	}
+	return ports[0].ContainerPort
+}
 
-	minor, err := strconv.Atoi(minorStrs[0])
+// GetDPDBPortEnv get the EnvVar which consists of the port number of targetPod.
+func GetDPDBPortEnv(pod *corev1.Pod, containerPort *dpv1alpha1.ContainerPort) (*corev1.EnvVar, error) {
+	if containerPort == nil {
+		return &corev1.EnvVar{Name: dptypes.DPDBPort, Value: strconv.Itoa(int(GetPodFirstContainerPort(pod)))}, nil
+	}
+	containerName := containerPort.ContainerName
+	portName := containerPort.PortName
+	for _, container := range pod.Spec.Containers {
+		if container.Name != containerName {
+			continue
+		}
+		for _, port := range container.Ports {
+			if port.Name == portName {
+				return &corev1.EnvVar{Name: dptypes.DPDBPort, Value: strconv.Itoa(int(port.ContainerPort))}, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("the specified containerPort of targetPod is not found")
+}
+
+// ExistTargetVolume checks if the backup.status.backupMethod.targetVolumes exists the target volume which should be restored.
+func ExistTargetVolume(targetVolumes *dpv1alpha1.TargetVolumeInfo, volumeName string) bool {
+	for _, v := range targetVolumes.Volumes {
+		if v == volumeName {
+			return true
+		}
+	}
+	for _, v := range targetVolumes.VolumeMounts {
+		if v.Name == volumeName {
+			return true
+		}
+	}
+	return false
+}
+
+// GetBackupTargets gets the backup targets by 'backupMethod' and 'backupPolicy'. 'backupMethod' has a higher priority than the global targets in 'backupPolicy'.
+func GetBackupTargets(backupPolicy *dpv1alpha1.BackupPolicy, backupMethod *dpv1alpha1.BackupMethod) []dpv1alpha1.BackupTarget {
+	var targets []dpv1alpha1.BackupTarget
+	switch {
+	case backupMethod.Target != nil:
+		targets = append(targets, *backupMethod.Target)
+	case len(backupMethod.Targets) > 0:
+		targets = backupMethod.Targets
+	case backupPolicy.Spec.Target != nil:
+		targets = append(targets, *backupPolicy.Spec.Target)
+	case len(backupPolicy.Spec.Targets) > 0:
+		targets = backupPolicy.Spec.Targets
+	}
+	return targets
+}
+
+func GetBackupStatusTarget(backupObj *dpv1alpha1.Backup, sourceTargetName string) *dpv1alpha1.BackupStatusTarget {
+	if backupObj.Status.Target != nil {
+		return backupObj.Status.Target
+	}
+	for _, v := range backupObj.Status.Targets {
+		if sourceTargetName == v.Name {
+			return &v
+		}
+	}
+	return nil
+}
+
+func ValidateParameters(actionSet *dpv1alpha1.ActionSet, parameters []dpv1alpha1.ParameterPair, isBackup bool) error {
+	if len(parameters) == 0 {
+		return nil
+	}
+	if actionSet == nil {
+		return fmt.Errorf("actionSet is empty")
+	}
+	var withParameters []string
+	if isBackup && actionSet.Spec.Backup != nil {
+		withParameters = actionSet.Spec.Backup.WithParameters
+	} else if !isBackup && actionSet.Spec.Restore != nil {
+		withParameters = actionSet.Spec.Restore.WithParameters
+	}
+	if len(withParameters) < len(parameters) {
+		return fmt.Errorf("some parameters are undeclared in withParameters of actionSet %s", actionSet.Name)
+	}
+	// check whether the parameter is declared in withParameters
+	parametersMap := map[string]string{}
+	for _, pair := range parameters {
+		parametersMap[pair.Name] = pair.Value
+	}
+	withParametersMap := map[string]struct{}{}
+	for _, v := range withParameters {
+		withParametersMap[v] = struct{}{}
+	}
+	for k := range parametersMap {
+		if _, ok := withParametersMap[k]; !ok {
+			return fmt.Errorf("parameter %s is undeclared in withParameters of actionSet %s", k, actionSet.Name)
+		}
+	}
+	schema := actionSet.Spec.ParametersSchema
+	if schema == nil || schema.OpenAPIV3Schema == nil || len(schema.OpenAPIV3Schema.Properties) == 0 {
+		return fmt.Errorf("the parametersSchema is invalid in actionSet %s", actionSet.Name)
+	}
+	// convert to type map[string]interface{} and validate the schema
+	params, err := common.ConvertStringToInterfaceBySchemaType(schema.OpenAPIV3Schema, parametersMap)
 	if err != nil {
-		return 0, 0, err
+		return intctrlutil.NewFatalError(err.Error())
 	}
-	return major, minor, nil
+	if err = common.ValidateDataWithSchema(schema.OpenAPIV3Schema, params); err != nil {
+		return intctrlutil.NewFatalError(err.Error())
+	}
+	return nil
+}
+
+func CompareWithBackupStopTime(backupI, backupJ dpv1alpha1.Backup) bool {
+	endTimeI := backupI.GetEndTime()
+	endTimeJ := backupJ.GetEndTime()
+	if endTimeI.IsZero() {
+		return false
+	}
+	if endTimeJ.IsZero() {
+		return true
+	}
+	if endTimeI.Equal(endTimeJ) {
+		return backupI.Name < backupJ.Name
+	}
+	return endTimeI.Before(endTimeJ)
 }

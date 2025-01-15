@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -65,6 +65,11 @@ func (f *MockBackupPolicyFactory) AddBackupMethod(name string,
 			ActionSetName:   actionSetName,
 			TargetVolumes:   &dpv1alpha1.TargetVolumeInfo{},
 		})
+	return f
+}
+
+func (f *MockBackupPolicyFactory) SetBackupMethodCompatibleMethod(name string) *MockBackupPolicyFactory {
+	f.Get().Spec.BackupMethods[len(f.Get().Spec.BackupMethods)-1].CompatibleMethod = name
 	return f
 }
 

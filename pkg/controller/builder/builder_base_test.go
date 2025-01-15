@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -44,10 +44,10 @@ var _ = Describe("base builder", func() {
 		annotations := map[string]string{annotationKey3: annotationValue3}
 		controllerRevision := "wer-23e23-sedfwe--34r23"
 		finalizer := "foo-bar"
-		owner := NewReplicatedStateMachineBuilder(ns, name).GetObject()
+		owner := NewInstanceSetBuilder(ns, name).GetObject()
 		owner.UID = "sdfwsedqw-swed-sdswe"
 		ownerAPIVersion := "workloads.kubeblocks.io/v1alpha1"
-		ownerKind := "ReplicatedStateMachine"
+		ownerKind := "InstanceSet"
 		obj := NewConfigMapBuilder(ns, name).
 			SetUID(uid).
 			AddLabels(labelKey1, labelValue1, labelKey2, labelValue2).

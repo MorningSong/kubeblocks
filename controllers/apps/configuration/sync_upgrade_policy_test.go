@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -28,7 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
-	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
+	appsv1beta1 "github.com/apecloud/kubeblocks/apis/apps/v1beta1"
 	cfgproto "github.com/apecloud/kubeblocks/pkg/configuration/proto"
 	mock_proto "github.com/apecloud/kubeblocks/pkg/configuration/proto/mocks"
 	testutil "github.com/apecloud/kubeblocks/pkg/testutil/k8s"
@@ -62,26 +62,20 @@ var _ = Describe("Reconfigure OperatorSyncPolicy", func() {
 				withGRPCClient(func(addr string) (cfgproto.ReconfigureClient, error) {
 					return reconfigureClient, nil
 				}),
-				withMockStatefulSet(3, nil),
+				withMockInstanceSet(3, nil),
 				withConfigSpec("for_test", map[string]string{"a": "c b e f"}),
-				withConfigConstraintSpec(&appsv1alpha1.FormatterConfig{Format: appsv1alpha1.RedisCfg}),
+				withConfigConstraintSpec(&appsv1beta1.FileFormatConfig{Format: appsv1beta1.RedisCfg}),
 				withConfigPatch(map[string]string{
 					"a": "c b e f",
 				}),
-				withClusterComponent(3),
-				withCDComponent(appsv1alpha1.Consensus, []appsv1alpha1.ComponentConfigSpec{{
-					ComponentTemplateSpec: appsv1alpha1.ComponentTemplateSpec{
-						Name:       "for_test",
-						VolumeName: "test_volume",
-					},
-				}}))
+				withClusterComponent(3))
 
 			By("mock client get pod caller")
 			k8sMockClient.MockListMethod(testutil.WithListReturned(
 				testutil.WithConstructListSequenceResult([][]runtime.Object{
-					fromPodObjectList(newMockPodsWithStatefulSet(&mockParam.ComponentUnits[0], 3,
+					fromPodObjectList(newMockPodsWithInstanceSet(&mockParam.InstanceSetUnits[0], 3,
 						withReadyPod(0, 1))),
-					fromPodObjectList(newMockPodsWithStatefulSet(&mockParam.ComponentUnits[0], 3,
+					fromPodObjectList(newMockPodsWithInstanceSet(&mockParam.InstanceSetUnits[0], 3,
 						withReadyPod(0, 3))),
 				}),
 				testutil.WithAnyTimes()))
@@ -119,31 +113,27 @@ var _ = Describe("Reconfigure OperatorSyncPolicy", func() {
 				withGRPCClient(func(addr string) (cfgproto.ReconfigureClient, error) {
 					return reconfigureClient, nil
 				}),
-				withMockStatefulSet(3, nil),
+				withMockInstanceSet(3, nil),
 				withConfigSpec("for_test", map[string]string{"a": "c b e f"}),
-				withConfigConstraintSpec(&appsv1alpha1.FormatterConfig{Format: appsv1alpha1.RedisCfg}),
+				withConfigConstraintSpec(&appsv1beta1.FileFormatConfig{Format: appsv1beta1.RedisCfg}),
 				withConfigPatch(map[string]string{
 					"a": "c b e f",
 				}),
-				withClusterComponent(3),
-				withCDComponent(appsv1alpha1.Consensus, []appsv1alpha1.ComponentConfigSpec{{
-					ComponentTemplateSpec: appsv1alpha1.ComponentTemplateSpec{
-						Name:       "for_test",
-						VolumeName: "test_volume",
-					},
-				}}))
+				withClusterComponent(3))
 
 			// add selector
-			mockParam.ConfigConstraint.Selector = &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"primary": "true",
+			mockParam.ConfigConstraint.ReloadAction = &appsv1beta1.ReloadAction{
+				TargetPodSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{
+						"primary": "true",
+					},
 				},
 			}
 
 			By("mock client get pod caller")
 			k8sMockClient.MockListMethod(testutil.WithListReturned(
 				testutil.WithConstructListReturnedResult(
-					fromPodObjectList(newMockPodsWithStatefulSet(&mockParam.ComponentUnits[0], 3,
+					fromPodObjectList(newMockPodsWithInstanceSet(&mockParam.InstanceSetUnits[0], 3,
 						withReadyPod(0, 1), func(pod *corev1.Pod, index int) {
 							if index == 0 {
 								if pod.Labels == nil {

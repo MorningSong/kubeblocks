@@ -89,15 +89,15 @@ spec:
           image: ...
 ```
 
-The above YAML file provides an outline of the ClusterDefinition and ClusterVersion for NebulaGraph. Corresponding to Figure 1., four components (including the client) and their version information are specified.
+The above YAML file provides an outline of the ClusterDefinition and ClusterVersion for NebulaGraph. Corresponding to the first figure, four components (including the client) and their version information are specified.
 
-If each component can be started independently, the information provided in Figure 2. would be sufficient.
+If each component can be started independently, the information provided in the above YAML file would be sufficient.
 
 However, it can be observed that in a multi-component cluster, there are often inter-component references. So, how to specify the references thereof?
 
 ## Configure inter-component references
 
-As discovered, components may refer to each other and Figure 3. shows the inter-component references in a NebulaGraph cluster. For example,
+As discovered, components may refer to each other and the figure below shows the inter-component references in a NebulaGraph cluster. For example,
 
 1. Nebula-Console needs to know the port number and service name of Nebula-Graphd.
 2. Nebula-Graphd needs to know the DNS of each Pod of Nebula-Metad. 
@@ -105,14 +105,17 @@ As discovered, components may refer to each other and Figure 3. shows the inter-
 
 ![Nebula Inter-Component References](./../../img/nebula-inter-component-ref.png)
 
-Therefore, three common types of inter-component references are: \
+Therefore, three common types of inter-component references are:
 
 1. **Service Reference**
-   e.g., Nebula-Console needs to obtain the service name of Nebula-Graphd.
+
+   E.g., Nebula-Console needs to obtain the service name of Nebula-Graphd.
 2. **HostName Reference**
-   e.g., Nebula-Graphd needs to configure the DNS of all Pods of Nebula-metad. This reference typically points to a stateful component.
+
+   E.g., Nebula-Graphd needs to configure the DNS of all Pods of Nebula-metad. This reference typically points to a stateful component.
 3. **Field Reference**
-   e.g., Nebula-Console needs to obtain a service port name of Nebula-Graphd.
+
+   E.g., Nebula-Console needs to obtain a service port name of Nebula-Graphd.
 
 To ensure that the cluster starts normally, the above information needs to be injected into the Pod through environment variables (whether it is loaded through configmap or defined as pod env).
 
@@ -169,18 +172,18 @@ Case 2: Nebula-Graphd needs to configure the DNS of all PODs of Nebula-Metad.
                 format: $(POD_FQDN):9559    # Optional, specify value format
 ```
 
-- Specify the component that is being referenced to as nebula-metad.
-- The name of the injected environment variable is NEBULA_METAD_SVC.
-- The value type of the variable is HeadlessServiceRef.
+- Specify the component that is being referenced to as `nebula-metad`.
+- The name of the injected environment variable is `NEBULA_METAD_SVC`.
+- The value type of the variable is `HeadlessServiceRef`.
   - It indicates that the value comes from the FQDN of all Pods of the referenced component, and multiple values are connected with , by default.
   - If the default FQDN format does not meet your needs, customize the format through format (as shown in Line 9).
 
 :::note
 
 KubeBlocks provides three built-in variables as placeholders and they will be replaced with specific values when the cluster is created:
-- ${POD_ORDINAL}, which is the ordinal number of the Pod.
-- ${POD_NAME}, which is the name of the Pod, formatted as `{clusterName}-{componentName}-{podOrdinal}`.
-- ${POD_FQDN}, which is the Fully Qualified Domain Name (FQDN) of the Pod.
+- `${POD_ORDINAL}`, which is the ordinal number of the Pod.
+- `${POD_NAME}`, which is the name of the Pod, formatted as `{clusterName}-{componentName}-{podOrdinal}`.
+- `${POD_FQDN}`, which is the Fully Qualified Domain Name (FQDN) of the Pod.
 
 In KubeBlocks, each stateful component has a Headless Service named `headlessServiceName = {clusterName}-{componentName}-headless` by default.
 
@@ -193,7 +196,7 @@ Therefore, the format of the Pod FQDN of each stateful component is:
 
 Case 3: Nebula-Console needs to obtain a service port name of Nebula-Graphd.
 
-When defining `nebula-console` , add the following configurations (as `componentDefRef` shows):
+When defining `nebula-console`, add the following configurations (as `componentDefRef` shows):
 
 ```yaml
     - name: nebula-console
@@ -224,7 +227,7 @@ Therefore, in `fieldPath`, you can use `$.componentDef.service.ports[?(@.name ==
 
 This tutorial takes NebulaGraph as an example and introduces several types and solutions of inter-component references.
 
-In addition to NebulaGraph, engines like GreptimDB, Pulsar, RisingWave and StarRocks also adopt `componentDefRef` API to deal with component references. You can also refer to their solutions.
+In addition to NebulaGraph, engines like GreptimeDB, Pulsar, RisingWave and StarRocks also adopt `componentDefRef` API to deal with component references. You can also refer to their solutions.
 
 For more information about the `componentDefRef`, refer to [ComponentDefRef API](https://kubeblocks.io/docs/release-0.6/developer_docs/api-reference/cluster#apps.kubeblocks.io/v1alpha1.ComponentDefRef).
 

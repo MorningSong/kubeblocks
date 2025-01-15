@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -23,12 +23,15 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
+	"slices"
 
 	"github.com/StudioSol/set"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	appsv1 "github.com/apecloud/kubeblocks/apis/apps/v1"
 	"github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
+	appsv1beta1 "github.com/apecloud/kubeblocks/apis/apps/v1beta1"
 	"github.com/apecloud/kubeblocks/pkg/configuration/core"
 	"github.com/apecloud/kubeblocks/pkg/configuration/util"
 	"github.com/apecloud/kubeblocks/pkg/configuration/validate"
@@ -50,10 +53,10 @@ type Result struct {
 }
 
 // MergeAndValidateConfigs merges and validates configuration files
-func MergeAndValidateConfigs(configConstraint v1alpha1.ConfigConstraintSpec, baseConfigs map[string]string, cmKey []string, updatedParams []core.ParamPairs) (map[string]string, error) {
+func MergeAndValidateConfigs(configConstraint appsv1beta1.ConfigConstraintSpec, baseConfigs map[string]string, cmKey []string, updatedParams []core.ParamPairs) (map[string]string, error) {
 	var (
 		err error
-		fc  = configConstraint.FormatterConfig
+		fc  = configConstraint.FileFormatConfig
 
 		newCfg         map[string]string
 		configOperator core.ConfigOperator
@@ -73,7 +76,11 @@ func MergeAndValidateConfigs(configConstraint v1alpha1.ConfigConstraintSpec, bas
 
 	// merge param to config file
 	for _, params := range updatedParams {
-		if err := configOperator.MergeFrom(params.UpdatedParams, core.NewCfgOptions(params.Key, core.WithFormatterConfig(fc))); err != nil {
+		validUpdatedParameters := filterImmutableParameters(params.UpdatedParams, configConstraint.ImmutableParameters)
+		if len(validUpdatedParameters) == 0 {
+			continue
+		}
+		if err := configOperator.MergeFrom(validUpdatedParameters, core.NewCfgOptions(params.Key, core.WithFormatterConfig(fc))); err != nil {
 			return nil, err
 		}
 		updatedKeys.Add(params.Key)
@@ -131,15 +138,22 @@ func IsRerender(configMap *corev1.ConfigMap, item v1alpha1.ConfigurationItemDeta
 	if configMap == nil {
 		return true
 	}
-	if item.Version == "" {
+	if item.Version == "" && item.Payload.Data == nil && item.ImportTemplateRef == nil {
 		return false
 	}
-
-	version, ok := configMap.Annotations[constant.CMConfigurationTemplateVersion]
-	if !ok || version != item.Version {
+	if version := configMap.Annotations[constant.CMConfigurationTemplateVersion]; version != item.Version {
 		return true
 	}
-	return false
+
+	var updatedVersion v1alpha1.ConfigurationItemDetail
+	updatedVersionStr, ok := configMap.Annotations[constant.ConfigAppliedVersionAnnotationKey]
+	if ok && updatedVersionStr != "" {
+		if err := json.Unmarshal([]byte(updatedVersionStr), &updatedVersion); err != nil {
+			return false
+		}
+	}
+	return !reflect.DeepEqual(updatedVersion.Payload, item.Payload) ||
+		!reflect.DeepEqual(updatedVersion.ImportTemplateRef, item.ImportTemplateRef)
 }
 
 // GetConfigSpecReconcilePhase gets the configuration phase
@@ -153,4 +167,75 @@ func GetConfigSpecReconcilePhase(configMap *corev1.ConfigMap,
 		return v1alpha1.CPendingPhase
 	}
 	return status.Phase
+}
+
+func CheckAndPatchPayload(item *v1alpha1.ConfigurationItemDetail, payloadID string, payload interface{}) (bool, error) {
+	if item == nil {
+		return false, nil
+	}
+	if item.Payload.Data == nil {
+		item.Payload.Data = make(map[string]interface{})
+	}
+	oldPayload, ok := item.Payload.Data[payloadID]
+	if !ok && payload == nil {
+		return false, nil
+	}
+	if payload == nil {
+		delete(item.Payload.Data, payloadID)
+		return true, nil
+	}
+	newPayload, err := buildPayloadAsUnstructuredObject(payload)
+	if err != nil {
+		return false, err
+	}
+	if oldPayload != nil && reflect.DeepEqual(oldPayload, newPayload) {
+		return false, nil
+	}
+	item.Payload.Data[payloadID] = newPayload
+	return true, nil
+}
+
+func buildPayloadAsUnstructuredObject(payload interface{}) (interface{}, error) {
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	var unstructuredObj any
+	if err = json.Unmarshal(b, &unstructuredObj); err != nil {
+		return nil, err
+	}
+	return unstructuredObj, nil
+}
+
+func ResourcesPayloadForComponent(resources corev1.ResourceRequirements) any {
+	if len(resources.Requests) == 0 && len(resources.Limits) == 0 {
+		return nil
+	}
+
+	return map[string]any{
+		"limits":   resources.Limits,
+		"requests": resources.Requests,
+	}
+}
+
+func filterImmutableParameters(parameters map[string]any, immutableParams []string) map[string]any {
+	if len(immutableParams) == 0 || len(parameters) == 0 {
+		return parameters
+	}
+
+	validParameters := make(map[string]any, len(parameters))
+	for key, val := range parameters {
+		if !slices.Contains(immutableParams, key) {
+			validParameters[key] = val
+		}
+	}
+	return validParameters
+}
+
+func TransformConfigTemplate(configs []appsv1.ComponentConfigSpec) []appsv1.ComponentTemplateSpec {
+	arr := make([]appsv1.ComponentTemplateSpec, 0, len(configs))
+	for _, config := range configs {
+		arr = append(arr, config.ComponentTemplateSpec)
+	}
+	return arr
 }

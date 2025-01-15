@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -20,7 +20,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 package restore
 
 import (
+	"encoding/json"
 	"fmt"
+	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,8 +38,8 @@ import (
 
 	dpv1alpha1 "github.com/apecloud/kubeblocks/apis/dataprotection/v1alpha1"
 	"github.com/apecloud/kubeblocks/pkg/constant"
+	"github.com/apecloud/kubeblocks/pkg/controller/component"
 	intctrlutil "github.com/apecloud/kubeblocks/pkg/controllerutil"
-	dperrors "github.com/apecloud/kubeblocks/pkg/dataprotection/errors"
 	dptypes "github.com/apecloud/kubeblocks/pkg/dataprotection/types"
 	"github.com/apecloud/kubeblocks/pkg/dataprotection/utils"
 )
@@ -48,6 +52,13 @@ func SetRestoreCondition(restore *dpv1alpha1.Restore, status metav1.ConditionSta
 		Status:  status,
 	}
 	meta.SetStatusCondition(&restore.Status.Conditions, condition)
+}
+func SetRestoreCheckBackupRepoCondition(restore *dpv1alpha1.Restore, reason, message string) {
+	status := metav1.ConditionFalse
+	if reason == ReasonCheckBackupRepoSuccessfully {
+		status = metav1.ConditionTrue
+	}
+	SetRestoreCondition(restore, status, ConditionTypeRestoreCheckBackupRepo, reason, message)
 }
 
 // SetRestoreValidationCondition sets restore condition which type is ConditionTypeRestoreValidationPassed.
@@ -108,7 +119,9 @@ func SetRestoreStatusAction(actions *[]dpv1alpha1.RestoreStatusAction,
 	if existingAction.Status != statusAction.Status {
 		existingAction.Status = statusAction.Status
 		existingAction.EndTime = statusAction.EndTime
-		existingAction.Message = statusAction.Message
+		if !strings.HasPrefix(existingAction.Message, dptypes.LogCollectorOutput) {
+			existingAction.Message = statusAction.Message
+		}
 	}
 }
 
@@ -146,22 +159,37 @@ func getTimeFormat(envs []corev1.EnvVar) string {
 	return time.RFC3339
 }
 
-func CompareWithBackupStopTime(backupI, backupJ dpv1alpha1.Backup) bool {
-	endTimeI := backupI.GetEndTime()
-	endTimeJ := backupJ.GetEndTime()
-	if endTimeI.IsZero() {
-		return false
+func transformTimeWithZone(targetTime *metav1.Time, timeZone string) (*metav1.Time, error) {
+	if timeZone == "" {
+		return targetTime, nil
 	}
-	if endTimeJ.IsZero() {
-		return true
+	formatErr := fmt.Errorf("incorrect format: only support such as +07:00")
+	if len(timeZone) != 6 {
+		return targetTime, formatErr
 	}
-	if endTimeI.Equal(endTimeJ) {
-		return backupI.Name < backupJ.Name
+	strs := strings.Split(timeZone, ":")
+	if len(strs) != 2 {
+		return targetTime, formatErr
 	}
-	return endTimeI.Before(endTimeJ)
+	hour, err := strconv.Atoi(strs[0])
+	if err != nil {
+		return targetTime, formatErr
+	}
+	minute, err := strconv.Atoi(strs[1])
+	if err != nil {
+		return targetTime, formatErr
+	}
+	offset := hour * 60 * 60
+	if hour < 0 {
+		offset += -1 * minute * 60
+	} else {
+		offset += minute * 60
+	}
+	zone := time.FixedZone("UTC", offset)
+	return &metav1.Time{Time: targetTime.In(zone)}, nil
 }
 
-func buildJobKeyForActionStatus(jobName string) string {
+func BuildJobKeyForActionStatus(jobName string) string {
 	return fmt.Sprintf("%s/%s", constant.JobKind, jobName)
 }
 
@@ -178,7 +206,7 @@ func getMountPathWithSourceVolume(backup *dpv1alpha1.Backup, volumeSource string
 }
 
 func restoreJobHasCompleted(statusActions []dpv1alpha1.RestoreStatusAction, jobName string) bool {
-	jobKey := buildJobKeyForActionStatus(jobName)
+	jobKey := BuildJobKeyForActionStatus(jobName)
 	for i := range statusActions {
 		if statusActions[i].ObjectKey == jobKey && statusActions[i].Status == dpv1alpha1.RestoreActionCompleted {
 			return true
@@ -215,6 +243,13 @@ func ValidateAndInitRestoreMGR(reqCtx intctrlutil.RequestCtx,
 		return err
 	}
 
+	// validate restore parameters
+	if backupSet.ActionSet != nil {
+		if err := utils.ValidateParameters(backupSet.ActionSet, restoreMgr.Restore.Spec.Parameters, false); err != nil {
+			return fmt.Errorf("fails to validate parameters with actionset %s: %v", backupSet.ActionSet.Name, err)
+		}
+	}
+
 	// TODO: check if there is permission for cross namespace recovery.
 
 	// check if the backup is completed exclude continuous backup.
@@ -226,14 +261,14 @@ func ValidateAndInitRestoreMGR(reqCtx intctrlutil.RequestCtx,
 
 	// build backupActionSets of prepareData and postReady stage based on the specified backup's type.
 	switch backupType {
-	case dpv1alpha1.BackupTypeFull:
+	case dpv1alpha1.BackupTypeFull, dpv1alpha1.BackupTypeSelective:
 		restoreMgr.SetBackupSets(*backupSet)
 	case dpv1alpha1.BackupTypeIncremental:
-		err = restoreMgr.BuildIncrementalBackupActionSets(reqCtx, cli, *backupSet)
+		err = restoreMgr.BuildIncrementalBackupActionSet(reqCtx, cli, *backupSet)
 	case dpv1alpha1.BackupTypeDifferential:
 		err = restoreMgr.BuildDifferentialBackupActionSets(reqCtx, cli, *backupSet)
 	case dpv1alpha1.BackupTypeContinuous:
-		err = intctrlutil.NewErrorf(dperrors.ErrorTypeWaitForExternalHandler, "wait for external handler to handle the Point-In-Time recovery.")
+		err = restoreMgr.BuildContinuousRestoreManager(reqCtx, cli, *backupSet)
 	default:
 		err = intctrlutil.NewFatalError(fmt.Sprintf("backup type of %s is empty", backupName))
 	}
@@ -263,8 +298,12 @@ func FormatRestoreTimeAndValidate(restoreTimeStr string, continuousBackup *dpv1a
 			return restoreTimeStr, err
 		}
 	}
-	restoreTimeStr = restoreTime.Format(time.RFC3339)
+	restoreTimeStr = restoreTime.UTC().Format(time.RFC3339)
 	// TODO: check with Recoverable time
+
+	if continuousBackup.Status.TimeRange == nil || continuousBackup.Status.TimeRange.Start.IsZero() || continuousBackup.Status.TimeRange.End.IsZero() {
+		return restoreTimeStr, fmt.Errorf("invalid timeRange of the backup")
+	}
 	if !isTimeInRange(restoreTime, continuousBackup.Status.TimeRange.Start.Time, continuousBackup.Status.TimeRange.End.Time) {
 		return restoreTimeStr, fmt.Errorf("restore-to-time is out of time range, you can view the recoverable time: \n"+
 			"\tkbcli cluster describe %s -n %s", continuousBackup.Labels[constant.AppInstanceLabelKey], continuousBackup.Namespace)
@@ -276,28 +315,192 @@ func isTimeInRange(t time.Time, start time.Time, end time.Time) bool {
 	return !t.Before(start) && !t.After(end)
 }
 
-func GetRestoreFromBackupAnnotation(backup *dpv1alpha1.Backup, volumeRestorePolicy string, compSpecsCount int, firstCompName string, restoreTime string) (string, error) {
-	componentName := backup.Labels[constant.KBAppComponentLabelKey]
+func GetRestoreFromBackupAnnotation(
+	backup *dpv1alpha1.Backup,
+	volumeRestorePolicy string,
+	restoreTime string,
+	env []corev1.EnvVar,
+	doReadyRestoreAfterClusterRunning bool,
+	parameters []dpv1alpha1.ParameterPair,
+) (string, error) {
+	componentName := component.GetComponentNameFromObj(backup)
 	if len(componentName) == 0 {
-		if compSpecsCount != 1 {
-			return "", fmt.Errorf("unable to obtain the name of the component to be recovered, please ensure that Backup.status.componentName exists")
-		}
-		componentName = firstCompName
+		return "", intctrlutil.NewFatalError("unable to obtain the name of the component to be recovered, please ensure that Backup.status.componentName exists")
 	}
-	backupNameString := fmt.Sprintf(`"%s":"%s"`, constant.BackupNameKeyForRestore, backup.Name)
-	backupNamespaceString := fmt.Sprintf(`"%s":"%s"`, constant.BackupNamespaceKeyForRestore, backup.Namespace)
-	volumeRestorePolicyString := fmt.Sprintf(`"%s":"%s"`, constant.VolumeRestorePolicyKeyForRestore, volumeRestorePolicy)
-	var restoreTimeString string
+	restoreInfoMap := map[string]string{}
+	restoreInfoMap[constant.BackupNameKeyForRestore] = backup.Name
+	restoreInfoMap[constant.BackupNamespaceKeyForRestore] = backup.Namespace
+	restoreInfoMap[constant.VolumeRestorePolicyKeyForRestore] = volumeRestorePolicy
+	restoreInfoMap[constant.DoReadyRestoreAfterClusterRunning] = strconv.FormatBool(doReadyRestoreAfterClusterRunning)
 	if restoreTime != "" {
-		restoreTimeString = fmt.Sprintf(`,"%s":"%s"`, constant.RestoreTimeKeyForRestore, restoreTime)
+		restoreInfoMap[constant.RestoreTimeKeyForRestore] = restoreTime
 	}
-
-	var passwordString string
-	connectionPassword := backup.Annotations[dptypes.ConnectionPasswordKey]
+	if env != nil {
+		bytes, err := json.Marshal(env)
+		if err != nil {
+			return "", err
+		}
+		restoreInfoMap[constant.EnvForRestore] = string(bytes)
+	}
+	if len(parameters) > 0 {
+		bytes, err := json.Marshal(parameters)
+		if err != nil {
+			return "", err
+		}
+		restoreInfoMap[constant.ParametersForRestore] = string(bytes)
+	}
+	connectionPassword := backup.Annotations[dptypes.ConnectionPasswordAnnotationKey]
 	if connectionPassword != "" {
-		passwordString = fmt.Sprintf(`,"%s":"%s"`, constant.ConnectionPassword, connectionPassword)
+		restoreInfoMap[constant.ConnectionPassword] = connectionPassword
 	}
+	encryptedSystemAccountsString := backup.Annotations[constant.EncryptedSystemAccountsAnnotationKey]
+	if encryptedSystemAccountsString != "" {
+		encryptedSystemAccountsMap := map[string]map[string]string{}
+		_ = json.Unmarshal([]byte(encryptedSystemAccountsString), &encryptedSystemAccountsMap)
+		// only set systemAccounts owned by this component
+		if encryptedSystemAccountsMap[componentName] != nil {
+			encryptedComponentSystemAccountsBytes, _ := json.Marshal(encryptedSystemAccountsMap[componentName])
+			restoreInfoMap[constant.EncryptedSystemAccounts] = string(encryptedComponentSystemAccountsBytes)
+		}
+	}
+	restoreForClusterMap := map[string]map[string]string{}
+	restoreForClusterMap[componentName] = restoreInfoMap
+	bytes, err := json.Marshal(restoreForClusterMap)
+	if err != nil {
+		return "", err
+	}
+	return string(bytes), nil
+}
 
-	restoreFromBackupAnnotation := fmt.Sprintf(`{"%s":{%s,%s,%s%s%s}}`, componentName, backupNameString, backupNamespaceString, volumeRestorePolicyString, restoreTimeString, passwordString)
-	return restoreFromBackupAnnotation, nil
+// GetSourcePodNameFromTarget gets the source pod name from backup status target according to 'RequiredPolicyForAllPodSelection'.
+func GetSourcePodNameFromTarget(target *dpv1alpha1.BackupStatusTarget,
+	requiredPolicy *dpv1alpha1.RequiredPolicyForAllPodSelection,
+	index int) (string, error) {
+	if target.PodSelector.Strategy == dpv1alpha1.PodSelectionStrategyAny {
+		return "", nil
+	}
+	if requiredPolicy == nil {
+		return "", intctrlutil.NewFatalError("requiredPolicyForAllPodSelection can not be empty when the pod selection strategy of the source target is All")
+	}
+	if requiredPolicy.DataRestorePolicy == dpv1alpha1.OneToManyRestorePolicy {
+		if requiredPolicy.SourceOfOneToMany == nil || requiredPolicy.SourceOfOneToMany.TargetPodName == "" {
+			return "", intctrlutil.NewFatalError("the source target pod can not be empty when restore policy is OneToMany")
+		}
+		return requiredPolicy.SourceOfOneToMany.TargetPodName, nil
+	}
+	if index >= len(target.SelectedTargetPods) {
+		return "", nil
+	}
+	// get the source target pod according to index for 'OneToOne' policy
+	return target.SelectedTargetPods[index], nil
+}
+
+// GetVolumeSnapshotsBySourcePod gets the volume snapshots of the backup and group by source target pod.
+func GetVolumeSnapshotsBySourcePod(backup *dpv1alpha1.Backup, target *dpv1alpha1.BackupStatusTarget, sourcePodName string) map[string]string {
+	actions := backup.Status.Actions
+	for i := range actions {
+		if len(actions[i].VolumeSnapshots) == 0 {
+			continue
+		}
+		if len(target.SelectedTargetPods) > 0 && !slices.Contains(target.SelectedTargetPods, actions[i].TargetPodName) {
+			continue
+		}
+		if sourcePodName != "" && sourcePodName != actions[i].TargetPodName {
+			continue
+		}
+		snapshotGroup := map[string]string{}
+		for _, v := range actions[i].VolumeSnapshots {
+			snapshotGroup[v.VolumeName] = v.Name
+		}
+		return snapshotGroup
+	}
+	return nil
+}
+
+// ValidateParentBackupSet validates the parent backup and child backup.
+func ValidateParentBackupSet(parentBackupSet *BackupActionSet, backupSet *BackupActionSet) error {
+	parentBackup := parentBackupSet.Backup
+	backup := backupSet.Backup
+	if parentBackup == nil || backup == nil {
+		return fmt.Errorf("parent backup or child backup is nil")
+	}
+	if parentBackup.Status.Phase != dpv1alpha1.BackupPhaseCompleted ||
+		backup.Status.Phase != dpv1alpha1.BackupPhaseCompleted {
+		return fmt.Errorf("parent backup or child backup is not completed")
+	}
+	// validate parent backup policy
+	if parentBackup.Spec.BackupPolicyName != backup.Spec.BackupPolicyName {
+		return fmt.Errorf(`parent backup policy: "%s" is defferent with child backup policy: "%s"`,
+			parentBackup.Spec.BackupPolicyName, backup.Spec.BackupPolicyName)
+	}
+	// validate parent backup method and base backup name
+	var parentBackupType dpv1alpha1.BackupType
+	if parentBackupSet.ActionSet != nil {
+		parentBackupType = parentBackupSet.ActionSet.Spec.BackupType
+	}
+	switch parentBackupType {
+	case dpv1alpha1.BackupTypeIncremental:
+		if parentBackup.Spec.BackupMethod != backup.Spec.BackupMethod {
+			return fmt.Errorf(`the parent incremental backup method "%s" is not the same with the child backup method "%s"`,
+				parentBackup.Spec.BackupMethod, backup.Spec.BackupMethod)
+		}
+		if parentBackup.Status.BaseBackupName != backup.Status.BaseBackupName {
+			return fmt.Errorf(`the parent incremental backup base backup "%s" is not the same with the child backup base backup "%s"`,
+				parentBackup.Status.BaseBackupName, backup.Status.BaseBackupName)
+		}
+	case dpv1alpha1.BackupTypeFull:
+		if parentBackup.Spec.BackupMethod != backup.Status.BackupMethod.CompatibleMethod {
+			return fmt.Errorf(`the parent full backup method "%s" is not compatible with the child backup method "%s"`,
+				parentBackup.Spec.BackupMethod, backup.Spec.BackupMethod)
+		}
+		if parentBackup.Name != backup.Status.BaseBackupName {
+			return fmt.Errorf(`the parent full backup base backup "%s" is not the same with the child backup base backup "%s"`,
+				parentBackup.Name, backup.Status.BaseBackupName)
+		}
+	default:
+		return fmt.Errorf(`the parent backup "%s" is not incremental or full backup`, parentBackup.Name)
+	}
+	// validate parent backup end time
+	if !utils.CompareWithBackupStopTime(*parentBackup, *backup) {
+		return fmt.Errorf(`the parent backup "%s" is not before the child backup "%s"`, parentBackup.Name, backup.Name)
+	}
+	return nil
+}
+
+// GetTargetRelativePath returns the target relative path.
+func GetTargetRelativePath(targetName, targetPodName string) string {
+	targetRelativePath := ""
+	if targetName != "" {
+		targetRelativePath = filepath.Join(targetRelativePath, targetName)
+	}
+	if targetPodName != "" {
+		targetRelativePath = filepath.Join(targetRelativePath, targetPodName)
+	}
+	// ${targetName}/${targetPodName}
+	return targetRelativePath
+}
+
+// BackupFilePathEnv returns the envs for backup root path and target relative path.
+func BackupFilePathEnv(filePath, targetName, targetPodName string) []corev1.EnvVar {
+	envs := []corev1.EnvVar{}
+	if len(filePath) == 0 {
+		return envs
+	}
+	targetRelativePath := GetTargetRelativePath(targetName, targetPodName)
+	envs = append(envs, []corev1.EnvVar{
+		{
+			Name:  dptypes.DPTargetRelativePath,
+			Value: targetRelativePath,
+		},
+		{
+			Name:  dptypes.DPBackupRootPath,
+			Value: filepath.Join("/", filePath, "../"),
+		},
+		// construct the backup base path with target relative path
+		{
+			Name:  dptypes.DPBackupBasePath,
+			Value: filepath.Join("/", filePath, targetRelativePath),
+		},
+	}...)
+	return envs
 }

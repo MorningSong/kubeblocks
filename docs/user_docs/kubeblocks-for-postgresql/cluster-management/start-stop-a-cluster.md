@@ -6,132 +6,173 @@ sidebar_position: 5
 sidebar_label: Stop/Start
 ---
 
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
 # Stop/Start PostgreSQL Cluster
 
-You can stop/start a cluster to save computing resources. When a cluster is stopped, the computing resources of this cluster are released, which means the pods of Kubernetes are released, but the storage resources are reserved. Start this cluster again if you want to restore the cluster resources from the original storage by snapshots.
+You can stop/start a cluster to save computing resources. When a cluster is stopped, the computing resources of this cluster are released, which means the pods of Kubernetes are released, but the storage resources are reserved. You can start this cluster again to restore it to the state it was in before it was stopped.
 
 ## Stop a cluster
 
-### Option 1. (Recommended) Use kbcli
+1. Configure the name of your cluster and run the command below to stop this cluster.
 
-Configure the name of your cluster and run the command below to stop this cluster.
+   <Tabs>
 
-```bash
-kbcli cluster stop <name>
-```
+   <TabItem value="OpsRequest" label="OpsRequest" default>
 
-***Example***
+   Apply an OpsRequest to stop a cluster.
 
-```bash
-kbcli cluster stop pg-cluster
-```
+   ```bash
+   kubectl apply -f - <<EOF
+   apiVersion: apps.kubeblocks.io/v1alpha1
+   kind: OpsRequest
+   metadata:
+     name: ops-stop
+     namespace: demo
+   spec:
+     clusterName: mycluster
+     type: Stop
+   EOF
+   ```
 
-### Option 2. Create an OpsRequest
+   </TabItem>
 
-Run the command below to stop a cluster.
+   <TabItem value="Edit cluster YAML file" label="Edit cluster YAML file">
 
-```bash
-kubectl apply -f - <<EOF
-apiVersion: apps.kubeblocks.io/v1alpha1
-kind: OpsRequest
-metadata:
-  name: pg-cluster
-  generateName: stop-
-spec:
-  # cluster ref
-  clusterRef: pg-cluster
-  type: Stop
-EOF
-```
+   Configure replicas as 0 to delete pods.
 
-### Option 3. Change the YAML file of the cluster
+   ```bash
+   kubectl edit cluster mycluster -n demo
+   ```
 
-Configure replicas as 0 to delete pods.
+   Edit the value of `spec.componentSpecs.replicas`.
 
-```yaml
-apiVersion: apps.kubeblocks.io/v1alpha1
-kind: Cluster
-metadata:
-    name: pg-cluster
-spec:
-  clusterDefinitionRef: postgresql
-  clusterVersionRef: postgresql-14.7.0
-  terminationPolicy: WipeOut
-  componentSpecs:
-  - name: pg-replication
-    componentDefRef: postgresql
-    monitor: false  
-    replicas: 0
-    volumeClaimTemplates:
-    - name: data
-      spec:
-        storageClassName: standard
-        accessModes:
-          - ReadWriteOnce
-        resources:
-          requests:
-            storage: 1Gi
-```
+   ```yaml
+   ...
+   spec:
+     clusterDefinitionRef: postgresql
+     clusterVersionRef: postgresql-14.8.0
+     terminationPolicy: Delete
+     componentSpecs:
+     - name: postgresql
+       componentDefRef: postgresql
+       disableExporter: true  
+       replicas: 0 # Change this value
+   ...
+   ```
+
+   </TabItem>
+
+   <TabItem value="kbcli" label="kbcli">
+
+   ```bash
+   kbcli cluster stop mycluster -n demo
+   ```
+
+   </TabItem>
+
+   </Tabs>
+
+2. Check the status of the cluster to see whether it is stopped.
+
+   <Tabs>
+
+   <TabItem value="kubectl" label="kubectl" default>
+
+   ```bash
+   kubectl get cluster mycluster -n demo
+   ```
+
+   </TabItem>
+
+   <TabItem value="kbcli" label="kbcli">
+
+   ```bash
+   kbcli cluster list -n demo
+   ```
+
+   </TabItem>
+
+   </Tabs>
 
 ## Start a cluster
+
+1. Configure the name of your cluster and run the command below to start this cluster.
+
+   <Tabs>
+
+   <TabItem value="OpsRequest" label="OpsRequest" default>
+
+   ```bash
+   kubectl apply -f - <<EOF
+   apiVersion: apps.kubeblocks.io/v1alpha1
+   kind: OpsRequest
+   metadata:
+     name: ops-start
+     namespace: demo
+   spec:
+     clusterName: mycluster
+     type: Start
+   EOF 
+   ```
+
+   </TabItem>
   
-### Option 1. (Recommended) Use kbcli
+   <TabItem value="Edit cluster YAML file" label="Edit cluster YAML file">
 
-Configure the name of your cluster and run the command below to start this cluster.
+   Change replicas back to the original amount to start this cluster again.
 
-```bash
-kbcli cluster start <name>
-```
+   ```bash
+   kubectl edit cluster mycluster -n demo
+   ```
 
-***Example***
+   Edit the value of `spec.componentSpecs.replicas`.
 
-```bash
-kbcli cluster start pg-cluster
-```
+   ```yaml
+   ...
+   spec:
+     clusterDefinitionRef: postgresql
+     clusterVersionRef: postgresql-14.8.0
+     terminationPolicy: Delete
+     componentSpecs:
+     - name: mysql
+       componentDefRef: mysql
+       disableExporter: true
+       replicas: 1 # Change this value
+   ...
+   ```
 
-### Option 2. Create an OpsRequest
+   </TabItem>
 
-Run the command below to start a cluster.
+   <TabItem value="kbcli" label="kbcli">
 
-```bash
-kubectl apply -f - <<EOF
-apiVersion: apps.kubeblocks.io/v1alpha1
-kind: OpsRequest
-metadata:
-  name: pg-cluster
-  generateName: start-
-spec:
-  # cluster ref
-  clusterRef: pg-cluster
-  type: Start
-EOF 
-```
+   ```bash
+   kbcli cluster start mycluster -n demo
+   ```
 
-### Option 3. Change the YAML file of the cluster
+   </TabItem>
 
-Change replicas back to the original amount to start this cluster again.
+   </Tabs>
 
-```yaml
-apiVersion: apps.kubeblocks.io/v1alpha1
-kind: Cluster
-metadata:
-    name: pg-cluster
-spec:
-  clusterDefinitionRef: postgresql
-  clusterVersionRef: postgresql-14.7.0
-  terminationPolicy: WipeOut
-  componentSpecs:
-  - name: pg-replication
-    componentDefRef: postgresql
-    monitor: false  
-    replicas: 1
-    volumeClaimTemplates:
-    - name: data
-      spec:
-        storageClassName: standard
-        accessModes:
-          - ReadWriteOnce
-        resources:
-          requests:
-            storage: 1Gi
-```
+2. Check the status of the cluster to see whether it is running again.
+
+   <Tabs>
+
+   <TabItem value="kubectl" label="kubectl" default>
+
+   ```bash
+   kubectl get cluster mycluster -n demo
+   ```
+
+   </TabItem>
+
+   <TabItem value="kbcli" label="kbcli">
+
+   ```bash
+   kbcli cluster list -n demo
+   ```
+
+   </TabItem>
+
+   </Tabs>

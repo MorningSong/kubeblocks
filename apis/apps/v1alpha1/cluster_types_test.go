@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,27 +26,12 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/apimachinery/pkg/util/yaml"
 
 	"github.com/apecloud/kubeblocks/pkg/constant"
 	viper "github.com/apecloud/kubeblocks/pkg/viperx"
 )
 
 var _ = Describe("", func() {
-	It("test GetMinAvailable", func() {
-		prefer := intstr.IntOrString{}
-		clusterCompSpec := &ClusterComponentSpec{}
-		Expect(clusterCompSpec.GetMinAvailable(nil)).Should(BeNil())
-		clusterCompSpec.NoCreatePDB = false
-		clusterCompSpec.Replicas = 1
-		Expect(clusterCompSpec.GetMinAvailable(&prefer).IntVal).Should(BeEquivalentTo(0))
-		clusterCompSpec.Replicas = 2
-		Expect(clusterCompSpec.GetMinAvailable(&prefer).IntVal).Should(BeEquivalentTo(1))
-		clusterCompSpec.Replicas = 3
-		Expect(clusterCompSpec.GetMinAvailable(&prefer)).Should(BeEquivalentTo(&prefer))
-	})
-
 	It("test toVolumeClaimTemplate", func() {
 		r := ClusterComponentVolumeClaimTemplate{}
 		r.Name = "test-name"
@@ -150,27 +135,16 @@ var _ = Describe("", func() {
 		Expect(r.GetVolumeClaimNames(compName)).Should(ContainElement(fmt.Sprintf("%s-%s-%s-%d", compName, r.Name, compName, 0)))
 	})
 
-	It("test GetDefNameMappingComponents", func() {
-		r := ClusterSpec{}
-		key := "comp-def-ref"
-		comp := ClusterComponentSpec{}
-		comp.ComponentDefRef = key
-		r.ComponentSpecs = []ClusterComponentSpec{comp}
-		Expect(r.GetDefNameMappingComponents()[key]).Should(ContainElement(comp))
-	})
-
 	It("test SetComponentStatus", func() {
 		r := ClusterStatus{}
 		status := ClusterComponentStatus{}
 		compName := "test-comp"
 		r.Components = map[string]ClusterComponentStatus{
 			compName: {
-				Phase:                "",
-				Message:              nil,
-				PodsReady:            nil,
-				PodsReadyTime:        nil,
-				ConsensusSetStatus:   nil,
-				ReplicationSetStatus: nil,
+				Phase:         "",
+				Message:       nil,
+				PodsReady:     nil,
+				PodsReadyTime: nil,
 			},
 		}
 		r.SetComponentStatus(compName, status)
@@ -223,53 +197,6 @@ var _ = Describe("", func() {
 		Expect(ComponentPodsAreReady(&ready)).Should(BeTrue())
 	})
 })
-
-func TestValidateEnabledLogs(t *testing.T) {
-	cluster := &Cluster{}
-	clusterDef := &ClusterDefinition{}
-	clusterByte := `
-apiVersion: apps.kubeblocks.io/v1alpha1
-kind: Cluster
-metadata:
-  name: wesql
-spec:
-  clusterVersionRef: cluster-version-consensus
-  clusterDefinitionRef: cluster-definition-consensus
-  componentSpecs:
-    - name: wesql-test
-      componentDefRef: replicasets
-      enabledLogs: [error, slow]
-`
-	clusterDefByte := `
-apiVersion: apps.kubeblocks.io/v1alpha1
-kind: ClusterDefinition
-metadata:
-  name: cluster-definition-consensus
-spec:
-  componentDefs:
-    - name: replicasets
-      workloadType: Consensus
-      logConfigs:
-        - name: error
-          filePathPattern: /log/mysql/mysqld.err
-        - name: slow
-          filePathPattern: /log/mysql/*slow.log
-      podSpec:
-        containers:
-          - name: mysql
-            imagePullPolicy: IfNotPresent`
-	_ = yaml.Unmarshal([]byte(clusterByte), cluster)
-	_ = yaml.Unmarshal([]byte(clusterDefByte), clusterDef)
-	// normal case
-	if err := cluster.Spec.ValidateEnabledLogs(clusterDef); err != nil {
-		t.Error("Expected empty conditionList")
-	}
-	// corner case
-	cluster.Spec.ComponentSpecs[0].EnabledLogs = []string{"error-test", "slow"}
-	if err := cluster.Spec.ValidateEnabledLogs(clusterDef); err == nil {
-		t.Error("Expected one element conditionList")
-	}
-}
 
 func TestGetMessage(t *testing.T) {
 	podKey := "Pod/test-01"

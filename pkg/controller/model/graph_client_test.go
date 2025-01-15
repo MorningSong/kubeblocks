@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -29,6 +29,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	workloads "github.com/apecloud/kubeblocks/apis/workloads/v1"
 	"github.com/apecloud/kubeblocks/pkg/controller/builder"
 	"github.com/apecloud/kubeblocks/pkg/controller/graph"
 )
@@ -44,7 +45,7 @@ var _ = Describe("graph client test.", func() {
 			graphCli := NewGraphClient(nil)
 			dag := graph.NewDAG()
 			dagExpected := graph.NewDAG()
-			root := builder.NewStatefulSetBuilder(namespace, name).GetObject()
+			root := builder.NewInstanceSetBuilder(namespace, name).GetObject()
 
 			By("init root vertex")
 			graphCli.Root(dag, root.DeepCopy(), root, ActionStatusPtr())
@@ -79,19 +80,13 @@ var _ = Describe("graph client test.", func() {
 
 			By("replace an existing object")
 			newObj1 := builder.NewPodBuilder(namespace, name+"1").GetObject()
-			graphCli.Update(dag, nil, newObj1, ReplaceIfExistingOption)
+			graphCli.Update(dag, nil, newObj1, &ReplaceIfExistingOption{})
 			Expect(dag.Equals(dagExpected, DefaultLess)).Should(BeTrue())
 			podList := graphCli.FindAll(dag, &corev1.Pod{})
 			Expect(podList).Should(HaveLen(3))
 			Expect(slices.IndexFunc(podList, func(obj client.Object) bool {
 				return obj == newObj1
 			})).Should(BeNumerically(">=", 0))
-
-			By("noop")
-			graphCli.Noop(dag, obj0)
-			Expect(dag.Equals(dagExpected, DefaultLess)).Should(BeFalse())
-			v0.Action = ActionNoopPtr()
-			Expect(dag.Equals(dagExpected, DefaultLess)).Should(BeTrue())
 
 			By("patch")
 			graphCli.Patch(dag, obj0.DeepCopy(), obj0)
@@ -115,7 +110,7 @@ var _ = Describe("graph client test.", func() {
 			Expect(graphCli.FindAll(dag, &appsv1.Deployment{})).Should(HaveLen(0))
 
 			By("find objects different with the given type")
-			newPodList := graphCli.FindAll(dag, &appsv1.StatefulSet{}, HaveDifferentTypeWithOption)
+			newPodList := graphCli.FindAll(dag, &workloads.InstanceSet{}, &HaveDifferentTypeWithOption{})
 			Expect(newPodList).Should(HaveLen(3))
 			// should have same result as podList
 			for _, object := range podList {
@@ -128,7 +123,7 @@ var _ = Describe("graph client test.", func() {
 			Expect(graphCli.FindAll(dag, nil)).Should(HaveLen(0))
 
 			By("find all objects")
-			objectList := graphCli.FindAll(dag, nil, HaveDifferentTypeWithOption)
+			objectList := graphCli.FindAll(dag, nil, &HaveDifferentTypeWithOption{})
 			Expect(objectList).Should(HaveLen(4))
 			allObjects := podList
 			allObjects = append(allObjects, root)
@@ -153,7 +148,7 @@ var _ = Describe("graph client test.", func() {
 			Expect(dag.Equals(dagExpected, DefaultLess)).Should(BeTrue())
 
 			By("post create root vertex")
-			root := builder.NewStatefulSetBuilder(namespace, name).GetObject()
+			root := builder.NewInstanceSetBuilder(namespace, name).GetObject()
 			graphCli.Root(dag, root.DeepCopy(), root, ActionStatusPtr())
 			rootVertex := &ObjectVertex{Obj: root, OriObj: root, Action: ActionStatusPtr()}
 			dagExpected.AddVertex(rootVertex)

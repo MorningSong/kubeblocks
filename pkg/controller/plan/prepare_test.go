@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -26,17 +26,17 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
+	appsv1 "github.com/apecloud/kubeblocks/apis/apps/v1"
+	appsv1beta1 "github.com/apecloud/kubeblocks/apis/apps/v1beta1"
 	cfgcore "github.com/apecloud/kubeblocks/pkg/configuration/core"
 	"github.com/apecloud/kubeblocks/pkg/controller/component"
 	"github.com/apecloud/kubeblocks/pkg/controller/configuration"
-	intctrlutil "github.com/apecloud/kubeblocks/pkg/controllerutil"
+	"github.com/apecloud/kubeblocks/pkg/controller/render"
 	"github.com/apecloud/kubeblocks/pkg/generics"
 	testapps "github.com/apecloud/kubeblocks/pkg/testutil/apps"
 )
 
 var _ = Describe("Prepare Test", func() {
-
 	cleanEnv := func() {
 		// must wait until resources deleted and no longer exist before the testcases start,
 		// otherwise if later it needs to create some new resource objects with the same name,
@@ -63,84 +63,66 @@ var _ = Describe("Prepare Test", func() {
 	})
 
 	const (
-		clusterDefName     = "test-clusterdef"
-		clusterVersionName = "test-clusterversion"
-		clusterName        = "test-cluster"
-
-		mysqlClusterCompDefName = "mysql-cluster-comp-def"
-		mysqlCompDefName        = "mysql-comp-def"
-		mysqlCompName           = "mysql"
+		compDefName   = "test-compdef"
+		clusterName   = "test-cluster"
+		mysqlCompName = "mysql"
 	)
+
 	var (
-		clusterDefObj     *appsv1alpha1.ClusterDefinition
-		clusterVersionObj *appsv1alpha1.ClusterVersion
-		compDefObj        *appsv1alpha1.ComponentDefinition
-		cluster           *appsv1alpha1.Cluster
-		configSpecName    string
+		compDefObj     *appsv1.ComponentDefinition
+		cluster        *appsv1.Cluster
+		comp           *appsv1.Component
+		configSpecName string
 	)
 
 	Context("create cluster with component and component definition API, testing render configuration", func() {
-		createAllWorkloadTypesClusterDef := func(noCreateAssociateCV ...bool) {
-			By("Create a clusterDefinition obj")
-			clusterDefObj = testapps.NewClusterDefFactory(clusterDefName).
-				AddComponentDef(testapps.ConsensusMySQLComponent, mysqlClusterCompDefName).
-				Create(&testCtx).GetObject()
-
-			if len(noCreateAssociateCV) > 0 && noCreateAssociateCV[0] {
-				return
-			}
-			By("Create a clusterVersion obj")
-			clusterVersionObj = testapps.NewClusterVersionFactory(clusterVersionName, clusterDefObj.GetName()).
-				AddComponentVersion(mysqlClusterCompDefName).AddContainerShort("mysql", testapps.ApeCloudMySQLImage).
-				Create(&testCtx).GetObject()
-
+		createAllTypesClusterDef := func() {
 			By("Create a componentDefinition obj")
-			compDefObj = testapps.NewComponentDefinitionFactory(mysqlCompDefName).
+			compDefObj = testapps.NewComponentDefinitionFactory(compDefName).
 				WithRandomName().
 				SetDefaultSpec().
 				AddConfigs(testapps.DefaultCompDefConfigs).
 				AddScripts(testapps.DefaultCompDefScripts).
-				AddContainerVolumeMounts("mysql", []corev1.VolumeMount{{Name: testapps.DefaultConfigSpecVolumeName, MountPath: "/mnt/config"}}).
+				AddVolumeMounts("mysql", []corev1.VolumeMount{{Name: testapps.DefaultConfigSpecVolumeName, MountPath: "/mnt/config"}}).
 				Create(&testCtx).
 				GetObject()
 		}
 
 		BeforeEach(func() {
-			createAllWorkloadTypesClusterDef()
+			createAllTypesClusterDef()
 
 			testapps.CreateCustomizedObj(&testCtx, "config/envfrom-config.yaml", &corev1.ConfigMap{}, testCtx.UseDefaultNamespace())
-			tpl := testapps.CreateCustomizedObj(&testCtx, "config/envfrom-constraint.yaml", &appsv1alpha1.ConfigConstraint{})
+			tpl := testapps.CreateCustomizedObj(&testCtx, "config/envfrom-constraint.yaml", &appsv1beta1.ConfigConstraint{})
 			configSpecName = tpl.Name
 
 			pvcSpec := testapps.NewPVCSpec("1Gi")
-			cluster = testapps.NewClusterFactory(testCtx.DefaultNamespace, clusterName, clusterDefObj.Name, clusterVersionObj.Name).
-				AddComponentV2(mysqlCompName, compDefObj.Name).
+			cluster = testapps.NewClusterFactory(testCtx.DefaultNamespace, clusterName, "").
+				AddComponent(mysqlCompName, compDefObj.Name).
 				SetReplicas(1).
 				AddVolumeClaimTemplate(testapps.DataVolumeName, pvcSpec).
 				Create(&testCtx).
 				GetObject()
+
+			var err error
+			comp, err = component.BuildComponent(cluster, &cluster.Spec.ComponentSpecs[0], nil, nil)
+			Expect(err).Should(Succeed())
+			comp.SetUID("test-uid")
 		})
 
 		It("render configuration should success", func() {
-			reqCtx := intctrlutil.RequestCtx{
-				Ctx: ctx,
-				Log: logger,
-			}
-			synthesizeComp, err := component.BuildSynthesizedComponentWrapper(reqCtx, testCtx.Cli, cluster, &cluster.Spec.ComponentSpecs[0])
+			synthesizeComp, err := component.BuildSynthesizedComponent(ctx, testCtx.Cli, compDefObj, comp, cluster)
 			Expect(err).Should(Succeed())
 			Expect(synthesizeComp.PodSpec).ShouldNot(BeNil())
-			resCtx := &intctrlutil.ResourceCtx{
+			resCtx := &render.ResourceCtx{
 				Context:       testCtx.Ctx,
 				Client:        testCtx.Cli,
 				Namespace:     synthesizeComp.Namespace,
 				ClusterName:   synthesizeComp.ClusterName,
 				ComponentName: synthesizeComp.Name,
 			}
-			err = RenderConfigNScriptFiles(resCtx, cluster, synthesizeComp, synthesizeComp.PodSpec, nil)
+			err = RenderConfigNScriptFiles(resCtx, cluster, comp, synthesizeComp, synthesizeComp.PodSpec, nil)
 			Expect(err).Should(Succeed())
 			Expect(configuration.CheckEnvFrom(&synthesizeComp.PodSpec.Containers[0], cfgcore.GenerateEnvFromName(cfgcore.GetComponentCfgName(cluster.Name, synthesizeComp.Name, configSpecName)))).Should(BeFalse())
-			// TODO(xingran): add more test cases
-			// Expect(len(synthesizeComp.PodSpec.Containers) >= 3).Should(BeTrue())
 		})
 	})
 })

@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -34,11 +34,11 @@ var _ = Describe("transform types test", func() {
 
 	Context("FindX function", func() {
 		It("should work well", func() {
-			root := builder.NewStatefulSetBuilder(namespace, name).GetObject()
+			root := builder.NewInstanceSetBuilder(namespace, name).GetObject()
 			vertex := &ObjectVertex{Obj: root}
-			Expect(vertex.String()).Should(Equal("{obj:*v1.StatefulSet, name: bar, action: nil}"))
+			Expect(vertex.String()).Should(Equal("{obj:*v1.InstanceSet, name: bar, action: nil}"))
 			vertex.Action = ActionCreatePtr()
-			Expect(vertex.String()).Should(Equal("{obj:*v1.StatefulSet, name: bar, action: CREATE}"))
+			Expect(vertex.String()).Should(Equal("{obj:*v1.InstanceSet, name: bar, action: CREATE}"))
 		})
 	})
 })

@@ -6,156 +6,183 @@ sidebar_position: 5
 sidebar_label: 停止/启动
 ---
 
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
 # 停止/启动集群
 
-你可以停止/启动集群以释放计算资源。当集群被停止时，其计算资源将被释放，也就是说 Kubernetes 的 Pod 将被释放，但其存储资源仍将被保留。如果你希望通过快照从原始存储中恢复集群资源，请重新启动该集群。
+您可以停止/启动集群以释放计算资源。停止集群后，其计算资源将被释放，也就是说 Kubernetes 的 Pod 将被释放，但其存储资源仍将被保留。您也可以重新启动该集群，使其恢复到停止集群前的状态。
 
 ## 停止集群
 
-### 选项 1.（推荐）使用 kbcli
+1. 配置集群名称，并执行以下命令来停止该集群。
 
-配置集群名称，并执行以下命令来停止该集群。
+    <Tabs>
 
-```bash
-kbcli cluster stop <name>
-```
+    <TabItem value="OpsRequest" label="OpsRequest" default>
 
-***示例***
+    ```bash
+    kubectl apply -f - <<EOF
+    apiVersion: apps.kubeblocks.io/v1alpha1
+    kind: OpsRequest
+    metadata:
+      name: ops-stop
+      namespace: demo
+    spec:
+      clusterName: mycluster
+      type: Stop
+    EOF
+    ```
 
-```bash
-kbcli cluster stop redis-cluster
-```
+    </TabItem>
 
-### 选项 2. 创建 OpsRequest
+    <TabItem value="编辑集群 YAML 文件" label="编辑集群 YAML 文件">
 
-执行以下命令来停止集群。
+    ```bash
+    kubectl edit cluster mycluster -n demo
+    ```
 
-```bash
-kubectl apply -f - <<EOF
-apiVersion: apps.kubeblocks.io/v1alpha1
-kind: OpsRequest
-metadata:
-  generateName: stop-
-spec:
-  # cluster ref
-  clusterRef: redis-cluster
-  type: Stop
-EOF
-```
+    将 replicas 设为 0，删除 Pods。
 
-### 选项 3. 更改 YAML 文件
+    ```yaml
+    ...
+    spec:
+      affinity:
+        podAntiAffinity: Preferred
+        topologyKeys:
+        - kubernetes.io/hostname
+      clusterDefinitionDef: redis
+      componentSpecs:
+      - componentDef: redis-7
+        enabledLogs:
+        - running
+        disableExporter: true
+        name: redis
+        replicas: 0 # 修改该参数值
+        ...
+      - componentDef: redis-sentinel-7
+        name: redis-sentinel
+        replicas: 0 # 修改该参数值
+        ...
+    ```
 
-将副本数设置为 0，删除 Pod。
+    </TabItem>
 
-```yaml
-apiVersion: apps.kubeblocks.io/v1alpha1
-kind: Cluster
-metadata:
-  name: redis-cluster
-spec:
-  clusterDefinitionRef: redis
-  clusterVersionRef: redis-7.0.6
-  terminationPolicy: Delete
-  componentSpecs:
-  - name: redis
-    componentDefRef: redis
-    monitor: true  
-    replicas: 0
-    volumeClaimTemplates:
-    - name: data
-      spec:
-        storageClassName: standard
-        accessModes:
-        - ReadWriteOnce
-        resources:
-          requests:
-            storage: 1Gi
-  - name: redis-sentinel
-    componentDefRef: redis-sentinel
-    monitor: true  
-    replicas: 0
-    volumeClaimTemplates:
-    - name: data
-      spec:
-        storageClassName: standard
-        accessModes:
-        - ReadWriteOnce
-        resources:
-          requests:
-            storage: 1Gi
-```
+    <TabItem value="kbcli" label="kbcli">
+
+    ```bash
+    kbcli cluster stop mycluster -n demo
+    ```
+
+    </TabItem>
+
+    </Tabs>
+
+2. 查看集群状态，确认集群是否已停止。
+
+    <Tabs>
+
+    <TabItem value="kubectl" label="kubectl" default>
+
+    ```bash
+    kubectl get cluster mycluster -n demo
+    ```
+
+    </TabItem>
+
+    <TabItem value="kbcli" label="kbcli">
+
+    ```bash
+    kbcli cluster list -n demo
+    ```
+
+    </TabItem>
+
+    </Tabs>
 
 ## 启动集群
-  
-### 选项 1.（推荐）使用 kbcli
 
-配置集群名称，并执行以下命令来启动该集群。  
+1. 配置集群名称，并执行以下命令来启动该集群。  
 
-```bash
-kbcli cluster start <name>
-```
+    <Tabs>
 
-***示例***
+    <TabItem value="OpsRequest" label="OpsRequest" default>
 
-```bash
-kbcli cluster start redis-cluster
-```
+    ```bash
+    kubectl apply -f - <<EOF
+    apiVersion: apps.kubeblocks.io/v1alpha1
+    kind: OpsRequest
+    metadata:
+      name: ops-start
+      namespace: demo
+    spec:
+      clusterName: mycluster
+      type: Start
+    EOF 
+    ```
 
-### 选项 2. 创建 OpsRequest
+    </TabItem>
 
-执行以下命令，启动集群。
+    <TabItem value="编辑集群 YAML 文件" label="编辑集群 YAML 文件">
 
-```yaml
-kubectl apply -f - <<EOF
-apiVersion: apps.kubeblocks.io/v1alpha1
-kind: OpsRequest
-metadata:
-  generateName: start-
-spec:
-  # cluster ref
-  clusterRef: redis-cluster
-  type: Start
-EOF 
-```
+    ```bash
+    kubectl edit cluster mycluster -n demo
+    ```
 
-### 选项 3. 更改 YAML 文件
+    将 replicas 数值调整为停止集群前的数量，再次启动集群。
 
-将副本数改为原始数量，重新启动该集群。
+    ```yaml
+    ...
+    spec:
+      affinity:
+        podAntiAffinity: Preferred
+        topologyKeys:
+        - kubernetes.io/hostname
+      clusterDefinitionDef: redis
+      componentSpecs:
+      - componentDef: redis-7
+        enabledLogs:
+        - running
+        disableExporter: true
+        name: redis
+        replicas: 3 # 修改该参数值
+        ...
+      - componentDef: redis-sentinel-7
+        name: redis-sentinel
+        replicas: 3 # 修改该参数值
+        ...
+    ```
 
-```yaml
-apiVersion: apps.kubeblocks.io/v1alpha1
-kind: Cluster
-metadata:
-    name: redis-cluster
-spec:
-  clusterDefinitionRef: redis
-  clusterVersionRef: redis-7.0.6
-  terminationPolicy: Delete
-  componentSpecs:
-  - name: redis
-    componentDefRef: redis
-    monitor: true  
-    replicas: 2
-    volumeClaimTemplates:
-    - name: data
-      spec:
-        storageClassName: standard
-        accessModes:
-        - ReadWriteOnce
-        resources:
-          requests:
-            storage: 1Gi
-  - name: redis-sentinel
-    componentDefRef: redis-sentinel
-    monitor: true  
-    replicas: 3
-    volumeClaimTemplates:
-    - name: data
-      spec:
-        storageClassName: standard
-        accessModes:
-        - ReadWriteOnce
-        resources:
-          requests:
-            storage: 1Gi
-```
+    </TabItem>
+
+    <TabItem value="kbcli" label="kbcli">
+
+    ```bash
+    kbcli cluster start mycluster -n demo
+    ```
+
+    </TabItem>
+
+    </Tabs>
+
+2. 查看集群状态，确认集群是否已停止。
+
+    <Tabs>
+
+    <TabItem value="kubectl" label="kubectl" default>
+
+    ```bash
+    kubectl get cluster mycluster -n demo
+    ```
+
+    </TabItem>
+
+    <TabItem value="kbcli" label="kbcli">
+
+    ```bash
+    kbcli cluster list -n demo
+    ```
+
+    </TabItem>
+
+    </Tabs>

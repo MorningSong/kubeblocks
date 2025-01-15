@@ -1,10 +1,12 @@
+{{- if has "victoria-metrics-agent" .Values.autoInstalledAddons  }}
 apiVersion: extensions.kubeblocks.io/v1alpha1
 kind: Addon
 metadata:
   name: victoria-metrics-agent
   labels:
     {{- include "kubeblocks.labels" . | nindent 4 }}
-    "kubeblocks.io/provider": community
+    "addon.kubeblocks.io/provider": community
+    "addon.kubeblocks.io/version": "0.8.41"
   {{- if .Values.keepAddons }}
   annotations:
     helm.sh/resource-policy: keep
@@ -16,11 +18,12 @@ spec:
   helm:
     {{- include "kubeblocks.addonChartLocationURL" ( dict "name" "victoria-metrics-agent" "version" "0.8.41" "values" .Values) | indent 4 }}
     {{- include "kubeblocks.addonChartsImage" . | indent 4 }}
+    {{- include "kubeblocks.addonHelmInstallOptions" (dict "version" "0.8.41" "values" .Values) | indent 4 }}
 
-    installOptions:
-      {{- if hasPrefix "oci://" .Values.addonChartLocationBase }}
-      version: 0.8.41
-      {{- end }}
+    installValues:
+      configMapRefs:
+        - name: victoria-metrics-agent-chart-kubeblocks-values
+          key: values-kubeblocks-override.yaml
 
     valuesMapping:
       valueMap:
@@ -45,3 +48,4 @@ spec:
 
   installable:
     autoInstall: false 
+{{- end }}

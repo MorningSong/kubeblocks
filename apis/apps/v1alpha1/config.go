@@ -1,20 +1,17 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
-This file is part of KubeBlocks project
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
+    http://www.apache.org/licenses/LICENSE-2.0
 
-This program is distributed in the hope that it will be useful
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU Affero General Public License for more details.
-
-You should have received a copy of the GNU Affero General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>.
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 */
 
 package v1alpha1
@@ -90,15 +87,16 @@ const (
 )
 
 type ConfigParams struct {
-	// Data holds the configuration keys and values.
-	// This field exists to work around https://github.com/kubernetes-sigs/kubebuilder/issues/528
-	// https://github.com/kubernetes/code-generator/issues/50
-
-	// fileContent indicates the configuration file content.
+	// Holds the configuration keys and values. This field is a workaround for issues found in kubebuilder and code-generator.
+	// Refer to https://github.com/kubernetes-sigs/kubebuilder/issues/528 and https://github.com/kubernetes/code-generator/issues/50 for more details.
+	//
+	// Represents the content of the configuration file.
+	//
 	// +optional
 	Content *string `json:"content"`
 
-	// updated parameters for a single configuration file.
+	// Represents the updated parameters for a single configuration file.
+	//
 	// +optional
 	Parameters map[string]*string `json:"parameters,omitempty"`
 }

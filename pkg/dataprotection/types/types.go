@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -21,5 +21,5 @@ package types
 
 var (
 	// DefaultBackOffLimit is the default backoff limit for jobs.
-	DefaultBackOffLimit = int32(3)
+	DefaultBackOffLimit = int32(2)
 )

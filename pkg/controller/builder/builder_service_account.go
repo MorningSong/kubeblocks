@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -31,4 +31,9 @@ func NewServiceAccountBuilder(namespace, name string) *ServiceAccountBuilder {
 	builder := &ServiceAccountBuilder{}
 	builder.init(namespace, name, &corev1.ServiceAccount{}, builder)
 	return builder
+}
+
+func (b *ServiceAccountBuilder) SetImagePullSecrets(secrets []corev1.LocalObjectReference) *ServiceAccountBuilder {
+	b.get().ImagePullSecrets = secrets
+	return b
 }

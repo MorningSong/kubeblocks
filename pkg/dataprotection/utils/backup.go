@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -31,7 +31,7 @@ import (
 // if backup policy is specified, search the backup policy with the name
 // if backup policy is not specified, search the default backup policy
 // if method's snapshotVolumes is true, use the method as the default backup method
-func GetBackupMethodsFromBackupPolicy(backupPolicyList *dpv1alpha1.BackupPolicyList, backupPolicyName string) (string, map[string]struct{}, error) {
+func GetBackupMethodsFromBackupPolicy(backupPolicyList *dpv1alpha1.BackupPolicyList, backupPolicyName string) (string, map[string]struct{}) {
 	var defaultBackupMethod string
 	var backupMethodsMap = make(map[string]struct{})
 	for _, policy := range backupPolicyList.Items {
@@ -53,8 +53,21 @@ func GetBackupMethodsFromBackupPolicy(backupPolicyList *dpv1alpha1.BackupPolicyL
 			backupMethodsMap[method.Name] = struct{}{}
 		}
 	}
-	if defaultBackupMethod == "" {
-		return "", nil, fmt.Errorf("failed to find default backup method which snapshotVolumes is true, please check cluster's backup policy")
+	return defaultBackupMethod, backupMethodsMap
+}
+
+func ValidateScheduleNames(schedules []dpv1alpha1.SchedulePolicy) error {
+	if len(schedules) == 0 {
+		return nil
 	}
-	return defaultBackupMethod, backupMethodsMap, nil
+	nameMap := map[string]struct{}{}
+	for _, sp := range schedules {
+		name := sp.GetScheduleName()
+		// names cannot be duplicated
+		if _, ok := nameMap[name]; ok {
+			return fmt.Errorf("schedule name %s is duplicated", name)
+		}
+		nameMap[name] = struct{}{}
+	}
+	return nil
 }

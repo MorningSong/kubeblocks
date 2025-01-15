@@ -1,10 +1,12 @@
+{{- if has "grafana" .Values.autoInstalledAddons  }}
 apiVersion: extensions.kubeblocks.io/v1alpha1
 kind: Addon
 metadata:
   name: grafana
   labels:
     {{- include "kubeblocks.labels" . | nindent 4 }}
-    "kubeblocks.io/provider": community
+    "addon.kubeblocks.io/provider": community
+    "addon.kubeblocks.io/version": "6.43.5"
   {{- if .Values.keepAddons }}
   annotations:
     helm.sh/resource-policy: keep
@@ -16,11 +18,7 @@ spec:
   helm:
     {{- include "kubeblocks.addonChartLocationURL" ( dict "name" "grafana" "version" "6.43.5" "values" .Values) | indent 4 }}
     {{- include "kubeblocks.addonChartsImage" . | indent 4 }}
-
-    installOptions:
-      {{- if hasPrefix "oci://" .Values.addonChartLocationBase }}
-      version: 6.43.5
-      {{- end }}
+    {{- include "kubeblocks.addonHelmInstallOptions" (dict "version" "6.43.5" "values" .Values) | indent 4 }}
 
     installValues:
       configMapRefs:
@@ -47,7 +45,6 @@ spec:
 
   defaultInstallValues:
     - replicas: 1
-      storageClass:
       resources:
         requests:
           storage: 1Gi
@@ -70,3 +67,4 @@ spec:
 
   installable:
     autoInstall: {{ .Values.grafana.enabled }}
+{{- end }}

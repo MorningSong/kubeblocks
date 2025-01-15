@@ -27,7 +27,7 @@ import TabItem from '@theme/TabItem';
 
 - [安装 AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)。
 - [安装 kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl)。
-- [安装 kbcli](./../installation/install-with-kbcli/install-kbcli.md)。
+- [安装 kbcli](./../installation/install-kbcli.md)。
 
 ### 配置访问密钥
 
@@ -85,7 +85,7 @@ kbcli cluster list
 请确保已经：
 - 拥有 Google Cloud 账户。
 - [安装 kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl)。
-- [安装 kbcli](./../installation/install-with-kbcli/install-kbcli.md)。
+- [安装 kbcli](./../installation/install-kbcli.md)。
 
 ### 配置 GCP 环境
 
@@ -156,7 +156,7 @@ kbcli cluster list
 请确保已经：
 - 拥有腾讯云账户。
 - [安装 kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl)。
-- [安装 kbcli](./../installation/install-with-kbcli/install-kbcli.md)。
+- [安装 kbcli](./../installation/install-kbcli.md)。
 
 ### 配置 TKE 环境
 
@@ -208,7 +208,7 @@ kbcli cluster list
 请确保已经：
 - 拥有阿里云账户。
 - [安装 kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl)。
-- [安装 kbcli](./../installation/install-with-kbcli/install-kbcli.md)。
+- [安装 kbcli](./../installation/install-kbcli.md)。
 
 ### 配置 ACK 环境
 
@@ -310,7 +310,7 @@ kbcli cluster connect mycluster
 1. 获取连接凭证。
 
    ```bash
-   kbcli cluster connect --show-example --client=cli mycluster
+   kbcli cluster connect --show-example --show-password --client=cli mycluster
    ```
 2. 执行 `port-forward`。
 
@@ -341,29 +341,6 @@ kbcli cluster connect mycluster
    +--------------------+
    5 rows in set (0.02 sec)
    ```
-
-### 观测 MySQL 集群
-
-KubeBlocks 具备完整的可观测性能力，下面主要演示其中的监控功能。
-
-***步骤：***
-
-1. 打开 Grafana 仪表盘。
-
-   ```bash
-   kbcli dashboard open kubeblocks-grafana
-   ```
-
-   ***结果***
-
-   命令执行后，将自动加载出 Grafana 网站的监控页面。
-
-
-2. 点击左侧栏的仪表盘图标，页面上会显示两个监控面板。
-   ![Dashboards](../../img/try-kb-on-cloud-dashboard.png)
-
-3. 点击 **General** -> **MySQL**，监控 Playground 创建的 MySQL 集群的状态。
-   ![MySQL_panel](../../img/try-kb-on-cloud-mysql-panel.png)
 
 ### MySQL 的高可用性
 

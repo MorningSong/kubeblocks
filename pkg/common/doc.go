@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -18,7 +18,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 /*
-Package common provides types and utils shared by all KubeBlocks components: KubeBlocks Core, KBCLI, Lorry etc.
+Package common provides types and utils shared by all KubeBlocks components: KubeBlocks Core, KBCLI etc.
 will promote to pkg/common when stable.
 */
 package common

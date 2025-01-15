@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -24,34 +24,42 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
+	_ "k8s.io/client-go/plugin/pkg/client/auth"
+
 	"github.com/fsnotify/fsnotify"
 	snapshotv1beta1 "github.com/kubernetes-csi/external-snapshotter/client/v3/apis/volumesnapshot/v1beta1"
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
 	"github.com/spf13/pflag"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/runtime"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	discoverycli "k8s.io/client-go/discovery"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	// +kubebuilder:scaffold:imports
 
+	appsv1 "github.com/apecloud/kubeblocks/apis/apps/v1"
 	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
 	dpv1alpha1 "github.com/apecloud/kubeblocks/apis/dataprotection/v1alpha1"
-	storagev1alpha1 "github.com/apecloud/kubeblocks/apis/storage/v1alpha1"
+	opsv1alpha1 "github.com/apecloud/kubeblocks/apis/operations/v1alpha1"
 	dpcontrollers "github.com/apecloud/kubeblocks/controllers/dataprotection"
-	storagecontrollers "github.com/apecloud/kubeblocks/controllers/storage"
 	"github.com/apecloud/kubeblocks/pkg/constant"
+	"github.com/apecloud/kubeblocks/pkg/controller/multicluster"
 	intctrlutil "github.com/apecloud/kubeblocks/pkg/controllerutil"
 	dptypes "github.com/apecloud/kubeblocks/pkg/dataprotection/types"
+	dputils "github.com/apecloud/kubeblocks/pkg/dataprotection/utils"
+	"github.com/apecloud/kubeblocks/pkg/metrics"
 	viper "github.com/apecloud/kubeblocks/pkg/viperx"
 )
 
@@ -69,20 +77,27 @@ const (
 	metricsAddrFlagKey   flagName = "metrics-bind-address"
 	leaderElectFlagKey   flagName = "leader-elect"
 	leaderElectIDFlagKey flagName = "leader-elect-id"
+
+	multiClusterKubeConfigFlagKey       flagName = "multi-cluster-kubeconfig"
+	multiClusterContextsFlagKey         flagName = "multi-cluster-contexts"
+	multiClusterContextsDisabledFlagKey flagName = "multi-cluster-contexts-disabled"
+
+	userAgentFlagKey flagName = "user-agent"
 )
 
 var (
-	scheme   = runtime.NewScheme()
+	scheme   = k8sruntime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
 )
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(appsv1.AddToScheme(scheme))
 	utilruntime.Must(appsv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(opsv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(dpv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(snapshotv1.AddToScheme(scheme))
 	utilruntime.Must(snapshotv1beta1.AddToScheme(scheme))
-	utilruntime.Must(storagev1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 
 	viper.SetConfigName("config")                          // name of config file (without extension)
@@ -100,14 +115,23 @@ func init() {
 	viper.SetDefault(constant.CfgKeyCtrlrMgrNS, "default")
 	viper.SetDefault(constant.KubernetesClusterDomainEnv, constant.DefaultDNSDomain)
 	viper.SetDefault(dptypes.CfgKeyGCFrequencySeconds, dptypes.DefaultGCFrequencySeconds)
+	viper.SetDefault(dptypes.CfgKeyWorkerServiceAccountName, "kubeblocks-dataprotection-worker")
+	viper.SetDefault(dptypes.CfgKeyExecWorkerServiceAccountName, "kubeblocks-dataprotection-exec-worker")
+	viper.SetDefault(dptypes.CfgKeyWorkerServiceAccountAnnotations, "{}")
+	viper.SetDefault(dptypes.CfgKeyWorkerClusterRoleName, "kubeblocks-dataprotection-worker-role")
+	viper.SetDefault(dptypes.CfgDataProtectionReconcileWorkers, runtime.NumCPU())
 }
 
 func main() {
 	var (
-		metricsAddr            string
-		enableLeaderElection   bool
-		enableLeaderElectionID string
-		probeAddr              string
+		metricsAddr                  string
+		enableLeaderElection         bool
+		enableLeaderElectionID       string
+		probeAddr                    string
+		multiClusterKubeConfig       string
+		multiClusterContexts         string
+		multiClusterContextsDisabled string
+		userAgent                    string
 	)
 
 	flag.String(metricsAddrFlagKey.String(), ":8080", "The address the metric endpoint binds to.")
@@ -119,6 +143,15 @@ func main() {
 	flag.String(leaderElectIDFlagKey.String(), "abd03fda",
 		"The leader election ID prefix for controller manager. "+
 			"This ID must be unique to controller manager.")
+
+	flag.String(multiClusterKubeConfigFlagKey.String(), "", "Paths to the kubeconfig for multi-cluster accessing.")
+	flag.String(multiClusterContextsFlagKey.String(), "", "Kube contexts the manager will talk to.")
+	flag.String(multiClusterContextsDisabledFlagKey.String(), "", "Kube contexts that mark as disabled.")
+
+	flag.String(userAgentFlagKey.String(), "", "User agent of the operator.")
+
+	flag.String(constant.ManagedNamespacesFlag, "",
+		"The namespaces that the operator will manage, multiple namespaces are separated by commas.")
 
 	opts := zap.Options{
 		Development: true,
@@ -149,9 +182,16 @@ func main() {
 	if err := viper.ReadInConfig(); err != nil { // Handle errors reading the config file
 		setupLog.Info("unable to read in config, errors ignored")
 	}
+	if err := intctrlutil.LoadRegistryConfig(); err != nil {
+		setupLog.Error(err, "unable to reload registry config")
+		os.Exit(1)
+	}
 	setupLog.Info(fmt.Sprintf("config file: %s", viper.GetViper().ConfigFileUsed()))
 	viper.OnConfigChange(func(e fsnotify.Event) {
 		setupLog.Info(fmt.Sprintf("config file changed: %s", e.Name))
+		if err := intctrlutil.LoadRegistryConfig(); err != nil {
+			setupLog.Error(err, "unable to reload registry config")
+		}
 	})
 	viper.WatchConfig()
 
@@ -159,6 +199,10 @@ func main() {
 	probeAddr = viper.GetString(probeAddrFlagKey.viperName())
 	enableLeaderElection = viper.GetBool(leaderElectFlagKey.viperName())
 	enableLeaderElectionID = viper.GetString(leaderElectIDFlagKey.viperName())
+	multiClusterKubeConfig = viper.GetString(multiClusterKubeConfigFlagKey.viperName())
+	multiClusterContexts = viper.GetString(multiClusterContextsFlagKey.viperName())
+	multiClusterContextsDisabled = viper.GetString(multiClusterContextsDisabledFlagKey.viperName())
+	userAgent = viper.GetString(userAgentFlagKey.viperName())
 
 	setupLog.Info(fmt.Sprintf("config settings: %v", viper.AllSettings()))
 	if err := validateRequiredToParseConfigs(); err != nil {
@@ -166,10 +210,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		MetricsBindAddress:     metricsAddr,
-		Port:                   9443,
+	managedNamespaces := viper.GetString(strings.ReplaceAll(constant.ManagedNamespacesFlag, "-", "_"))
+	if len(managedNamespaces) > 0 {
+		setupLog.Info(fmt.Sprintf("managed namespaces: %s", managedNamespaces))
+	}
+	mgr, err := ctrl.NewManager(intctrlutil.GetKubeRestConfig(userAgent), ctrl.Options{
+		Scheme: scheme,
+		Metrics: server.Options{
+			BindAddress:   metricsAddr,
+			ExtraHandlers: metrics.RuntimeMetric(),
+		},
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		// NOTES:
@@ -191,12 +241,45 @@ func main() {
 		// after the manager stops then its usage might be unsafe.
 		LeaderElectionReleaseOnCancel: true,
 
-		CertDir:               viper.GetString("cert_dir"),
-		ClientDisableCacheFor: intctrlutil.GetUncachedObjects(),
+		WebhookServer: webhook.NewServer(webhook.Options{
+			Port:    9443,
+			CertDir: viper.GetString("cert_dir"),
+		}),
+		Client: client.Options{
+			Cache: &client.CacheOptions{
+				DisableFor: intctrlutil.GetUncachedObjects(),
+			},
+		},
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
+	}
+
+	cli, err := discoverycli.NewDiscoveryClientForConfig(mgr.GetConfig())
+	if err != nil {
+		setupLog.Error(err, "unable to create discovery client")
+		os.Exit(1)
+	}
+
+	ver, err := cli.ServerVersion()
+	if err != nil {
+		setupLog.Error(err, "unable to discover version info")
+		os.Exit(1)
+	}
+	viper.SetDefault(constant.CfgKeyServerInfo, *ver)
+
+	// multi-cluster manager for all data-plane k8s
+	multiClusterMgr, err := multicluster.Setup(mgr.GetScheme(), mgr.GetConfig(), mgr.GetClient(),
+		multiClusterKubeConfig, multiClusterContexts, multiClusterContextsDisabled)
+	if err != nil {
+		setupLog.Error(err, "unable to setup multi-cluster manager")
+		os.Exit(1)
+	}
+
+	client := mgr.GetClient()
+	if multiClusterMgr != nil {
+		client = multiClusterMgr.GetClient()
 	}
 
 	if err = (&dpcontrollers.ActionSetReconciler{
@@ -246,7 +329,7 @@ func main() {
 	}
 
 	if err = (&dpcontrollers.BackupScheduleReconciler{
-		Client:   mgr.GetClient(),
+		Client:   dputils.NewCompatClient(mgr.GetClient()),
 		Scheme:   mgr.GetScheme(),
 		Recorder: mgr.GetEventRecorderFor("backup-schedule-controller"),
 	}).SetupWithManager(mgr); err != nil {
@@ -254,22 +337,43 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err = (&dpcontrollers.BackupPolicyTemplateReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("backup-policy-template-controller"),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "BackupPolicyTemplate")
+		os.Exit(1)
+	}
+
 	if err = (&dpcontrollers.BackupRepoReconciler{
-		Client:     mgr.GetClient(),
-		Scheme:     mgr.GetScheme(),
-		Recorder:   mgr.GetEventRecorderFor("backup-repo-controller"),
-		RestConfig: mgr.GetConfig(),
+		Client:          client,
+		Scheme:          mgr.GetScheme(),
+		Recorder:        mgr.GetEventRecorderFor("backup-repo-controller"),
+		RestConfig:      mgr.GetConfig(),
+		MultiClusterMgr: multiClusterMgr,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "BackupRepo")
 		os.Exit(1)
 	}
 
-	if err = (&storagecontrollers.StorageProviderReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("storage-provider-controller"),
+	if err = (&dpcontrollers.StorageProviderReconciler{
+		Client:          client,
+		Scheme:          mgr.GetScheme(),
+		Recorder:        mgr.GetEventRecorderFor("storage-provider-controller"),
+		MultiClusterMgr: multiClusterMgr,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "StorageProvider")
+		os.Exit(1)
+	}
+
+	if err = (&dpcontrollers.LogCollectionReconciler{
+		Client:     mgr.GetClient(),
+		Scheme:     mgr.GetScheme(),
+		Recorder:   mgr.GetEventRecorderFor("log-collection-controller"),
+		RestConfig: mgr.GetConfig(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "logCollectionController")
 		os.Exit(1)
 	}
 
@@ -289,20 +393,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	cli, err := discoverycli.NewDiscoveryClientForConfig(mgr.GetConfig())
-	if err != nil {
-		setupLog.Error(err, "unable to create discovery client")
-		os.Exit(1)
-	}
-
-	ver, err := cli.ServerVersion()
-	if err != nil {
-		setupLog.Error(err, "unable to discover version info")
-		os.Exit(1)
-	}
-	viper.SetDefault(constant.CfgKeyServerInfo, *ver)
-
 	setupLog.Info("starting manager")
+	if multiClusterMgr != nil {
+		if err := multiClusterMgr.Bind(mgr); err != nil {
+			setupLog.Error(err, "failed to bind multi-cluster manager to manager")
+			os.Exit(1)
+		}
+	}
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
@@ -334,6 +431,14 @@ func validateRequiredToParseConfigs() error {
 		return json.Unmarshal([]byte(val), &affinity)
 	}
 
+	validateWorkerServiceAccountAnnotations := func(val string) error {
+		if val == "" {
+			return nil
+		}
+		annotations := map[string]string{}
+		return json.Unmarshal([]byte(val), &annotations)
+	}
+
 	if err := validateTolerations(viper.GetString(constant.CfgKeyCtrlrMgrTolerations)); err != nil {
 		return err
 	}
@@ -346,5 +451,16 @@ func validateRequiredToParseConfigs() error {
 			return err
 		}
 	}
+	if err := validateWorkerServiceAccountAnnotations(viper.GetString(dptypes.CfgKeyWorkerServiceAccountAnnotations)); err != nil {
+		return err
+	}
+
+	if imagePullSecrets := viper.GetString(constant.KBImagePullSecrets); imagePullSecrets != "" {
+		secrets := make([]corev1.LocalObjectReference, 0)
+		if err := json.Unmarshal([]byte(imagePullSecrets), &secrets); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }

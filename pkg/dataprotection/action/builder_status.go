@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -59,6 +59,11 @@ func (b *statusBuilder) startTimestamp(timestamp *metav1.Time) *statusBuilder {
 		}
 	}
 	b.status.StartTimestamp = t
+	return b
+}
+
+func (b *statusBuilder) volumeSnapshots(volumeSnapshots []dpv1alpha1.VolumeSnapshotStatus) *statusBuilder {
+	b.status.VolumeSnapshots = volumeSnapshots
 	return b
 }
 

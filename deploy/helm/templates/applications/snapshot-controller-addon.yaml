@@ -1,10 +1,12 @@
+{{- if has "snapshot-controller" .Values.autoInstalledAddons  }}
 apiVersion: extensions.kubeblocks.io/v1alpha1
 kind: Addon
 metadata:
   name: snapshot-controller
   labels:
     {{- include "kubeblocks.labels" . | nindent 4 }}
-    "kubeblocks.io/provider": community
+    "addon.kubeblocks.io/provider": community
+    "addon.kubeblocks.io/version": "1.7.2"
   {{- if .Values.keepAddons }}
   annotations:
     helm.sh/resource-policy: keep
@@ -18,11 +20,7 @@ spec:
   helm:
     {{- include "kubeblocks.addonChartLocationURL" ( dict "name" "snapshot-controller" "version" "1.7.2" "values" .Values) | indent 4 }}
     {{- include "kubeblocks.addonChartsImage" . | indent 4 }}
-
-    installOptions:
-     {{- if hasPrefix "oci://" .Values.addonChartLocationBase }}
-      version: 1.7.2
-     {{- end }}
+    {{- include "kubeblocks.addonHelmInstallOptions" (dict "version" "1.7.2" "values" .Values) | indent 4 }}
 
     installValues:
       configMapRefs:
@@ -94,3 +92,4 @@ spec:
         values:
           - huaweiCloud
           - azure
+{{- end }}

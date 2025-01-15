@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -21,17 +21,24 @@ package backup
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"path/filepath"
+	"slices"
 	"strings"
 
+	"github.com/rogpeppe/go-internal/semver"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/pointer"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	dpv1alpha1 "github.com/apecloud/kubeblocks/apis/dataprotection/v1alpha1"
 	"github.com/apecloud/kubeblocks/pkg/constant"
 	"github.com/apecloud/kubeblocks/pkg/dataprotection/action"
 	"github.com/apecloud/kubeblocks/pkg/dataprotection/types"
+	dputils "github.com/apecloud/kubeblocks/pkg/dataprotection/utils"
 )
 
 func getVolumesByNames(pod *corev1.Pod, volumeNames []string) []corev1.Volume {
@@ -123,13 +130,13 @@ func excludeLabelsForWorkload() []string {
 
 // BuildBackupWorkloadLabels builds the labels for workload which owned by backup.
 func BuildBackupWorkloadLabels(backup *dpv1alpha1.Backup) map[string]string {
-	labels := backup.Labels
-	if labels == nil {
-		labels = map[string]string{}
-	} else {
-		for _, v := range excludeLabelsForWorkload() {
-			delete(labels, v)
+	labels := map[string]string{}
+	excludeLabels := excludeLabelsForWorkload()
+	for k, v := range backup.Labels {
+		if slices.Contains(excludeLabels, k) {
+			continue
 		}
+		labels[k] = v
 	}
 	labels[types.BackupNameLabelKey] = backup.Name
 	return labels
@@ -147,35 +154,99 @@ func GenerateBackupJobName(backup *dpv1alpha1.Backup, prefix string) string {
 	name := fmt.Sprintf("%s-%s-%s", prefix, backup.Name, backup.UID[:8])
 	// job name cannot exceed 63 characters for label name limit.
 	if len(name) > 63 {
-		return name[:63]
+		return strings.TrimSuffix(name[:63], "-")
 	}
 	return name
 }
 
-// GenerateCRNameByBackupSchedule generate a CR name which is created by BackupSchedule, such as CronJob Backup.
-func GenerateCRNameByBackupSchedule(backupSchedule *dpv1alpha1.BackupSchedule, method string) string {
-	name := fmt.Sprintf("%s-%s", generateUniqueNameWithBackupSchedule(backupSchedule), backupSchedule.Namespace)
+func GenerateBackupStatefulSetName(backup *dpv1alpha1.Backup, targetName, prefix string) string {
+	name := backup.Name
+	// for cluster mode with multiple targets, the statefulSet name should include the target name.
+	if targetName != "" {
+		name = fmt.Sprintf("%s-%s-%s", prefix, targetName, backup.Name)
+	}
+	// statefulSet name cannot exceed 52 characters for label name limit as the statefulset controller will
+	// add a 10-length suffix to the name to construct the label "controller-revision-hash": "<statefulset_name>-<hash>"
+	return strings.TrimSuffix(name[:min(len(name), 52)], "-")
+}
+
+func generateBaseCRNameByBackupSchedule(uniqueNameWithBackupSchedule, backupScheduleNS, method string) string {
+	name := fmt.Sprintf("%s-%s", uniqueNameWithBackupSchedule, backupScheduleNS)
 	if len(name) > 30 {
-		name = strings.TrimRight(name[:30], "-")
+		name = strings.TrimSuffix(name[:30], "-")
 	}
 	return fmt.Sprintf("%s-%s", name, method)
 }
 
-func generateUniqueNameWithBackupSchedule(backupSchedule *dpv1alpha1.BackupSchedule) string {
-	uniqueName := backupSchedule.Name
+// GenerateCRNameByBackupSchedule generate a CR name which is created by BackupSchedule, such as Continuous Backup.
+func GenerateCRNameByBackupSchedule(backupSchedule *dpv1alpha1.BackupSchedule, method string) string {
+	uid := backupSchedule.UID[:8]
 	if len(backupSchedule.OwnerReferences) > 0 {
-		uniqueName = fmt.Sprintf("%s-%s", backupSchedule.OwnerReferences[0].UID[:8], backupSchedule.OwnerReferences[0].Name)
+		uid = backupSchedule.OwnerReferences[0].UID[:8]
 	}
-	return uniqueName
+	uniqueNameWithBackupSchedule := fmt.Sprintf("%s-%s", uid, backupSchedule.Name)
+	return generateBaseCRNameByBackupSchedule(uniqueNameWithBackupSchedule, backupSchedule.Namespace, method)
 }
 
-// BuildBackupPath builds the path to storage backup data in backup repository.
-func BuildBackupPath(backup *dpv1alpha1.Backup, pathPrefix string) string {
-	pathPrefix = strings.TrimRight(pathPrefix, "/")
-	if strings.TrimSpace(pathPrefix) == "" || strings.HasPrefix(pathPrefix, "/") {
-		return fmt.Sprintf("/%s%s/%s", backup.Namespace, pathPrefix, backup.Name)
+// GenerateCRNameByScheduleNameAndMethod generate a CR name which is created by BackupSchedule, such as CronJob.
+func GenerateCRNameByScheduleNameAndMethod(backupSchedule *dpv1alpha1.BackupSchedule, method string, name string) string {
+	suffix := name
+	if len(suffix) == 0 {
+		suffix = method
 	}
-	return fmt.Sprintf("/%s/%s/%s", backup.Namespace, pathPrefix, backup.Name)
+	return GenerateCRNameByBackupSchedule(backupSchedule, suffix)
+}
+
+// GenerateLegacyCRNameByBackupSchedule generate a legacy CR name which is created by BackupSchedule, such as CronJob.
+func GenerateLegacyCRNameByBackupSchedule(backupSchedule *dpv1alpha1.BackupSchedule, method string) string {
+	uniqueNameWithBackupSchedule := fmt.Sprintf("%s-%s", backupSchedule.UID[:8], backupSchedule.Name)
+	return generateBaseCRNameByBackupSchedule(uniqueNameWithBackupSchedule, backupSchedule.Namespace, method)
+}
+
+// BuildBaseBackupPath builds the path to storage backup data in backup repository.
+func BuildBaseBackupPath(backup *dpv1alpha1.Backup, repoPathPrefix, pathPrefix string) string {
+	backupRootPath := BuildBackupRootPath(backup, repoPathPrefix, pathPrefix)
+	// pattern: ${repoPathPrefix}/${namespace}/${pathPrefix}/${backupName}
+	return filepath.Join("/", backupRootPath, backup.Name)
+}
+
+// BuildBackupRootPath builds the root path to storage backup data in backup repository.
+func BuildBackupRootPath(backup *dpv1alpha1.Backup, repoPathPrefix, pathPrefix string) string {
+	repoPathPrefix = strings.Trim(repoPathPrefix, "/")
+	pathPrefix = strings.Trim(pathPrefix, "/")
+	// pattern: ${repoPathPrefix}/${namespace}/${pathPrefix}
+	return filepath.Join("/", repoPathPrefix, backup.Namespace, pathPrefix)
+}
+
+// BuildBackupPathByTarget builds the backup by target.name and podSelectionStrategy.
+func BuildBackupPathByTarget(backup *dpv1alpha1.Backup,
+	target *dpv1alpha1.BackupTarget,
+	repoPathPrefix,
+	pathPrefix,
+	targetPodName string) string {
+	baseBackupPath := BuildBaseBackupPath(backup, repoPathPrefix, pathPrefix)
+	targetRelativePath := BuildTargetRelativePath(target, targetPodName)
+	return filepath.Join("/", baseBackupPath, targetRelativePath)
+}
+
+// BuildTargetRelativePath builds the relative path by target.name and podSelectionStrategy.
+func BuildTargetRelativePath(target *dpv1alpha1.BackupTarget, targetPodName string) string {
+	path := ""
+	if target.Name != "" {
+		path = filepath.Join(path, target.Name)
+	}
+	if target.PodSelector.Strategy == dpv1alpha1.PodSelectionStrategyAll {
+		path = filepath.Join(path, targetPodName)
+	}
+	// return ${DP_TARGET_RELATIVE_PATH}
+	return path
+}
+
+// BuildKopiaRepoPath builds the path of kopia repository.
+func BuildKopiaRepoPath(backup *dpv1alpha1.Backup, repoPathPrefix, pathPrefix string) string {
+	repoPathPrefix = strings.Trim(repoPathPrefix, "/")
+	pathPrefix = strings.TrimRight(pathPrefix, "/")
+	return filepath.Join("/", repoPathPrefix, backup.Namespace, pathPrefix, types.KopiaRepoFolderName)
 }
 
 func GetSchedulePolicyByMethod(backupSchedule *dpv1alpha1.BackupSchedule, method string) *dpv1alpha1.SchedulePolicy {
@@ -216,4 +287,55 @@ func SetExpirationByCreationTime(backup *dpv1alpha1.Backup) error {
 	}
 	backup.Status.Expiration = expiration
 	return nil
+}
+
+// BuildCronJobSchedule build cron job schedule info based on kubernetes version.
+// For kubernetes version >= 1.25, the timeZone field is supported, return timezone.
+// Ref https://kubernetes.io/docs/concepts/workloads/controllers/cron-jobs/#time-zones
+//
+// For kubernetes version < 1.25 and >= 1.22, the timeZone field is not supported.
+// Therefore, we need to set the CRON_TZ environment variable.
+// Ref https://github.com/kubernetes/kubernetes/issues/47202#issuecomment-901294870
+//
+// For kubernetes version < 1.22, the CRON_TZ environment variable is not supported.
+// The kube-controller-manager interprets schedules relative to its local time zone.
+func BuildCronJobSchedule(cronExpression string) (*string, string) {
+	timeZone := "UTC"
+	ver, err := dputils.GetKubeVersion()
+	if err != nil {
+		return nil, cronExpression
+	}
+	if semver.Compare(ver, "v1.25") >= 0 {
+		return &timeZone, cronExpression
+	}
+	if semver.Compare(ver, "v1.22") < 0 {
+		return nil, cronExpression
+	}
+	return nil, fmt.Sprintf("CRON_TZ=%s %s", timeZone, cronExpression)
+}
+
+// StopStatefulSetsWhenFailed stops the sts to un-bound the pvcs.
+func StopStatefulSetsWhenFailed(ctx context.Context, cli client.Client, backup *dpv1alpha1.Backup, targetName string) error {
+	if backup.Status.Phase != dpv1alpha1.BackupPhaseFailed {
+		return nil
+	}
+	sts := &appsv1.StatefulSet{}
+	stsName := GenerateBackupStatefulSetName(backup, targetName, BackupDataJobNamePrefix)
+	if err := cli.Get(ctx, client.ObjectKey{Name: stsName, Namespace: backup.Namespace}, sts); client.IgnoreNotFound(err) != nil {
+		return nil
+	}
+	sts.Spec.Replicas = pointer.Int32(0)
+	return cli.Update(ctx, sts)
+}
+
+func BuildParametersManifest(parameters []dpv1alpha1.ParameterPair) (string, error) {
+	if len(parameters) == 0 {
+		return "", nil
+	}
+	bytes, err := json.Marshal(parameters)
+	if err != nil {
+		return "", err
+	}
+	res := fmt.Sprintf("\n  parameters: %s", string(bytes))
+	return res, nil
 }

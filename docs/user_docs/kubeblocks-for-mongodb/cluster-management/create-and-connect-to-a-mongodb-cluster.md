@@ -1,7 +1,7 @@
 ---
 title: Create and connect to a MongoDB Cluster
 description: How to create and connect to a MongoDB cluster
-keywords: [mogodb, create a mongodb cluster]
+keywords: [mongodb, create a mongodb cluster]
 sidebar_position: 1
 sidebar_label: Create and connect
 ---
@@ -17,32 +17,32 @@ This tutorial shows how to create and connect to a MongoDB cluster.
 
 ### Before you start
 
-* [Install kbcli](./../../installation/install-with-kbcli/install-kbcli.md) if you want to create and connect a cluster by kbcli.
-* Install KubeBlocks: You can install KubeBlocks by [kbcli](./../../installation/install-with-kbcli/install-kubeblocks-with-kbcli.md) or by [Helm](./../../installation/install-with-helm/install-kubeblocks-with-helm.md).
-* Make sure the MongoDB add-on is enabled.
-  
+* [Install kbcli](./../../installation/install-kbcli.md) if you want to create and connect a MySQL cluster by `kbcli`.
+* [Install KubeBlocks](./../../installation/install-kubeblocks.md).
+* Make sure the MongoDB Addon is enabled. If this addon is not enabled, [enable it](./../../installation/install-addons.md) first.
+
   <Tabs>
 
-  <TabItem value="kbcli" label="kbcli" default>
+  <TabItem value="kubectl" label="kubectl" default>
 
   ```bash
-  kbcli addon list
+  kubectl get addons.extensions.kubeblocks.io mongodb
   >
-  NAME                           TYPE   STATUS     EXTRAS         AUTO-INSTALL   INSTALLABLE-SELECTOR
-  ...
-  mongodb                        Helm   Enabled                   true
-  ...
+  NAME      TYPE   VERSION   PROVIDER   STATUS    AGE
+  mongodb   Helm                        Enabled   23m
   ```
 
   </TabItem>
 
-  <TabItem value="kubectl" label="kubectl">
+  <TabItem value="kbcli" label="kbcli">
 
   ```bash
-  kubectl get clusterdefinitions mongodb
+  kbcli addon list
   >
-  NAME      MAIN-COMPONENT-NAME   STATUS      AGE
-  mongodb   mongodb               Available   118m
+  NAME                           TYPE   STATUS     EXTRAS         AUTO-INSTALL
+  ...
+  mongodb                        Helm   Enabled                   true
+  ...
   ```
 
   </TabItem>
@@ -53,34 +53,27 @@ This tutorial shows how to create and connect to a MongoDB cluster.
 
   <Tabs>
 
-  <TabItem value="kbcli" label="kbcli" default>
+  <TabItem value="kubectl" label="kubectl" default>
+
+  ```bash
+  kubectl get clusterdefinition mongodb
+  >
+  NAME      TOPOLOGIES   SERVICEREFS   STATUS      AGE
+  mongodb                              Available   23m
+  ```
+
+  ```bash
+  kubectl get clusterversions -l clusterdefinition.kubeblocks.io/name=mongodb
+  ```
+
+  </TabItem>
+
+  <TabItem value="kbcli" label="kbcli">
 
   ```bash
   kbcli clusterdefinition list
 
   kbcli clusterversion list
-  ```
-
-  </TabItem>
-
-  <TabItem value="kubectl" label="kubectl">
-
-  Make sure the `mongodb` cluster definition is installed with `kubectl get clusterdefinitions mongodb`.
-
-  ```bash
-  kubectl get clusterdefinitions mongodb
-  >
-  NAME      MAIN-COMPONENT-NAME   STATUS      AGE
-  mongodb   mongodb               Available   118m
-  ```
-
-  View all available versions for creating a cluster.
-
-  ```bash
-  kubectl get clusterversions -l clusterdefinition.kubeblocks.io/name=mongodb
-  >
-  NAME             CLUSTER-DEFINITION   STATUS      AGE
-  mongodb-5.0   mongodb              Available   118m
   ```
 
   </TabItem>
@@ -97,210 +90,126 @@ This tutorial shows how to create and connect to a MongoDB cluster.
 
 ### Create a cluster
 
-KubeBlocks supports creating two types of MongoDB clusters: Standalone and ReplicaSet. Standalone only supports one replica and can be used in scenarios with lower requirements for availability. For scenarios with high availability requirements, it is recommended to create a ReplicaSet, which creates a cluster with a three replicas to support automatic failover. And to ensure high availability, all replicas are distributed on different nodes by default.
+KubeBlocks supports creating two types of MongoDB clusters: Standalone and ReplicaSet. Standalone only supports one replica and can be used in scenarios with lower requirements for availability. For scenarios with high availability requirements, it is recommended to create a ReplicaSet, which creates a cluster with two replicas to support automatic failover. To ensure high availability, all replicas are distributed on different nodes by default.
 
 <Tabs>
 
-<TabItem value="kbcli" label="kbcli" default>
+<TabItem value="kubectl" label="kubectl" default>
 
-Create a Standalone.
+1. Create a MongoDB Standalone.
 
-```bash
-kbcli cluster create mongodb <clustername>
-```
+   KubeBlocks implements a `Cluster` CRD to define a cluster. Here is an example of creating a MongoDB Standalone.
 
-Create a ReplicatSet.
+   If you only have one node for deploying a ReplicaSet Cluster, configure the cluster affinity by setting `spec.schedulingPolicy` or `spec.componentSpecs.schedulingPolicy`. For details, you can refer to the [API docs](https://kubeblocks.io/docs/preview/developer_docs/api-reference/cluster#apps.kubeblocks.io/v1.SchedulingPolicy). But for a production environment, it is not recommended to deploy all replicas on one node, which may decrease the cluster availability.
 
-```bash
-kbcli cluster create mongodb --mode replicaset <clustername>
-```
+   ```yaml
+   cat <<EOF | kubectl apply -f -
+   apiVersion: apps.kubeblocks.io/v1
+   kind: Cluster
+   metadata:
+     name: mycluster
+     namespace: demo
+   spec:
+     terminationPolicy: Delete
+     clusterDef: mongodb
+     topology: replicaset
+     componentSpecs:
+       - name: mongodb
+         serviceVersion: "6.0.16"
+         replicas: 3
+         resources:
+           limits:
+             cpu: '0.5'
+             memory: 0.5Gi
+           requests:
+             cpu: '0.5'
+             memory: 0.5Gi
+         volumeClaimTemplates:
+           - name: data
+             spec:
+               storageClassName: ""
+               accessModes:
+                 - ReadWriteOnce
+               resources:
+                 requests:
+                   storage: 20Gi
+   EOF
+   ```
 
-If you only have one node for deploying a ReplicaSet, set the `availability-policy` as `none` when creating a ReplicaSet.
+   | Field                                 | Definition  |
+   |---------------------------------------|--------------------------------------|
+   | `spec.terminationPolicy`              | It is the policy of cluster termination. Valid values are `DoNotTerminate`, `Delete`, `WipeOut`. For the detailed definition, you can refer to [Termination Policy](./delete-mongodb-cluster.md#termination-policy). |
+   | `spec.clusterDef` | It specifies the name of the ClusterDefinition to use when creating a Cluster. **Note: DO NOT UPDATE THIS FIELD**. The value must be `mongodb` to create a MongoDB Cluster. |
+   | `spec.topology` | It specifies the name of the ClusterTopology to be used when creating the Cluster. |
+   | `spec.componentSpecs`                 | It is the list of ClusterComponentSpec objects that define the individual Components that make up a Cluster. This field allows customized configuration of each component within a cluster.   |
+   | `spec.componentSpecs.serviceVersion` | It specifies the version of the Service expected to be provisioned by this Component. Valid options are: [4.0.28,4.2.24,4.4.29,5.0.28,6.0.16,7.0.1]. |
+   | `spec.componentSpecs.disableExporter` | It determines whether metrics exporter information is annotated on the Component's headless Service. Valid options are [true, false]. |
+   | `spec.componentSpecs.replicas`        | It specifies the number of replicas of the component. |
+   | `spec.componentSpecs.resources`       | It specifies the resources required by the Component.  |
+   | `spec.componentSpecs.volumeClaimTemplates` | It specifies a list of PersistentVolumeClaim templates that define the storage requirements for the Component. |
+   | `spec.componentSpecs.volumeClaimTemplates.name` | It refers to the name of a volumeMount defined in `componentDefinition.spec.runtime.containers[*].volumeMounts`. |
+   | `spec.componentSpecs.volumeClaimTemplates.spec.storageClassName` | It is the name of the StorageClass required by the claim. If not specified, the StorageClass annotated with `storageclass.kubernetes.io/is-default-class=true` will be used by default. |
+   | `spec.componentSpecs.volumeClaimTemplates.spec.resources.storage` | You can set the storage size as needed. |
 
-```bash
-kbcli cluster create mongodb --mode replicaset --availability-policy none <clustername>
-```
+   For more API fields and descriptions, refer to the [API Reference](https://kubeblocks.io/docs/preview/developer_docs/api-reference/cluster).
 
-:::note
+   KubeBlocks operator watches for the `Cluster` CRD and creates the cluster and all dependent resources. You can get all the resources created by the cluster by running the command below.
 
-* In the production environment, it is not recommended to deploy all replicas on one node, which may decrease cluster availability.
-* Run the command below to view the flags for creating a MongoDB cluster and the default values.
-  
-  ```bash
-  kbcli cluster create mongodb -h
-  ```
+   ```bash
+   kubectl get all,secret,rolebinding,serviceaccount -l app.kubernetes.io/instance=mycluster -n demo
+   ```
 
-:::
+   Run the following command to view the created MongoDB cluster object.
+
+   ```bash
+   kubectl get cluster mycluster -n demo -o yaml
+   ```
+
+2. Verify whether this cluster is created successfully.
+
+   ```bash
+   kubectl get cluster mycluster -n demo
+   >
+   NAME        CLUSTER-DEFINITION   VERSION           TERMINATION-POLICY   STATUS    AGE
+   mycluster   mongodb              mongodb-5.0       Delete               Running   12m
+   ```
 
 </TabItem>
 
-<TabItem value="kubectl" label="kubectl">
+<TabItem value="kbcli" label="kbcli">
 
-KubeBlocks implements a `Cluster` CRD to define a cluster. Here is an example of creating a MongoDB Standalone.
+1. Create a MongoDB cluster.
 
-  ```bash
-  cat <<EOF | kubectl apply -f -
-  apiVersion: apps.kubeblocks.io/v1alpha1
-  kind: Cluster
-  metadata:
-    name: mongodb-cluster
-    namespace: demo
-    labels: 
-      helm.sh/chart: mongodb-cluster-0.6.0-alpha.36
-      app.kubernetes.io/version: "5.0"
-      app.kubernetes.io/instance: mongodb
-  spec:
-    clusterVersionRef: mongodb-5.0
-    terminationPolicy: Delete  
-    affinity:
-      podAntiAffinity: Preferred
-      topologyKeys:
-        - kubernetes.io/hostname
-      tenancy: SharedNode
-    clusterDefinitionRef: mongodb
-    componentSpecs:
-      - name: mongodb
-        componentDefRef: mongodb      
-        monitor: false      
-        replicas: 1
-        serviceAccountName: kb-mongodb      
-        resources:
-          limits:
-            cpu: "0.5"
-            memory: "0.5Gi"
-          requests:
-            cpu: "0.5"
-            memory: "0.5Gi"      
-        volumeClaimTemplates:
-          - name: data # ref clusterDefinition components.containers.volumeMounts.name
-            spec:
-              accessModes:
-                - ReadWriteOnce
-              resources:
-                requests:
-                  storage: 20Gi      
-        services:
-  EOF
-  ```
+   ```bash
+   kbcli cluster create mongodb mycluster -n demo
+   ```
 
-* `spec.clusterDefinitionRef` is the name of the cluster definition CRD that defines the cluster components.
-* `spec.clusterVersionRef` is the name of the cluster version CRD that defines the cluster version.
-* `spec.componentSpecs` is the list of components that define the cluster components.
-* `spec.componentSpecs.componentDefRef` is the name of the component definition that is defined in the cluster definition, you can get the component definition names with `kubectl get clusterdefinition mongodb -o json | jq '.spec.componentDefs[].name'`
-* `spec.componentSpecs.name` is the name of the component.
-* `spec.componentSpecs.replicas` is the number of replicas of the component.
-* `spec.componentSpecs.resources` is the resource requirements of the component.
-* `spec.componentSpecs.volumeClaimTemplates` is the list of volume claim templates that define the volume claim templates for the component.
-* `spec.terminationPolicy` is the policy of the cluster termination. The default value is `Delete`. Valid values are `DoNotTerminate`, `Halt`, `Delete`, `WipeOut`. `DoNotTerminate` will block delete operation. `Halt` will delete workload resources such as statefulset and deployment workloads but keep PVCs. `Delete` is based on Halt and deletes PVCs. `WipeOut` is based on Delete and wipe out all volume snapshots and snapshot data from backup storage location.
+   The commands above are some common examples to create a cluster with default settings. If you want to customize your cluster specifications, kbcli provides various options, such as setting cluster version, termination policy, CPU, and memory. You can view these options by adding `--help` or `-h` flag.
 
-KubeBlocks operator watches for the `Cluster` CRD and creates the cluster and all dependent resources. You can get all the resources created by the cluster with `kubectl get all,secret,rolebinding,serviceaccount -l app.kubernetes.io/instance=mongodb-cluster -n demo`.
+   ```bash
+   kbcli cluster create mongodb --help
+   kbcli cluster create mongodb -h
+   ```
 
-```bash
-kubectl get all,secret,rolebinding,serviceaccount -l app.kubernetes.io/instance=mongodb-cluster -n demo
-```
+   If you only have one node for deploying a cluster with multiple replicas, you can configure the cluster affinity by setting `--pod-anti-affinity`, `--tolerations`, and `--topology-keys` when creating a cluster. But you should note that for a production environment, it is not recommended to deploy all replicas on one node, which may decrease the cluster availability. For example,
 
-Run the following command to see the created MongoDB cluster object.
+   ```bash
+   kbcli cluster create mongodb mycluster \
+       --mode='replicaset' \
+       --pod-anti-affinity='Preferred' \
+       --tolerations='node-role.kubeblocks.io/data-plane:NoSchedule' \
+       --topology-keys='null' \
+       --namespace demo
+   ```
 
-```bash
-kubectl get cluster mongodb-cluster -n demo -o yaml
-```
+2. Verify whether this cluster is created successfully.
 
-<details>
-
-<summary>Output</summary>
-
-```yaml
-apiVersion: apps.kubeblocks.io/v1alpha1
-kind: Cluster
-metadata:
-  annotations:
-    kubectl.kubernetes.io/last-applied-configuration: |
-      {"apiVersion":"apps.kubeblocks.io/v1alpha1","kind":"Cluster","metadata":{"annotations":{},"labels":{"app.kubernetes.io/instance":"mongodb","app.kubernetes.io/version":"5.0","helm.sh/chart":"mongodb-cluster-0.6.0-alpha.36"},"name":"mongodb-cluster","namespace":"demo"},"spec":{"affinity":{"podAntiAffinity":"Preferred","tenancy":"SharedNode","topologyKeys":["kubernetes.io/hostname"]},"clusterDefinitionRef":"mongodb","clusterVersionRef":"mongodb-5.0","componentSpecs":[{"componentDefRef":"mongodb","monitor":false,"name":"mongodb","replicas":1,"resources":{"limits":{"cpu":"0.5","memory":"0.5Gi"},"requests":{"cpu":"0.5","memory":"0.5Gi"}},"serviceAccountName":"kb-mongodb","services":null,"volumeClaimTemplates":[{"name":"data","spec":{"accessModes":["ReadWriteOnce"],"resources":{"requests":{"storage":"20Gi"}}}}]}],"terminationPolicy":"Delete"}}
-  creationTimestamp: "2023-07-19T08:59:48Z"
-  finalizers:
-  - cluster.kubeblocks.io/finalizer
-  generation: 1
-  labels:
-    app.kubernetes.io/instance: mongodb
-    app.kubernetes.io/version: 5.0
-    clusterdefinition.kubeblocks.io/name: mongodb
-    clusterversion.kubeblocks.io/name: mongodb-5.0
-    helm.sh/chart: mongodb-cluster-0.6.0-alpha.36
-  name: mongodb-cluster
-  namespace: demo
-  resourceVersion: "16137"
-  uid: 6a488eaa-29f2-417f-b248-d10d0512e14a
-spec:
-  affinity:
-    podAntiAffinity: Preferred
-    tenancy: SharedNode
-    topologyKeys:
-    - kubernetes.io/hostname
-  clusterDefinitionRef: mongodb
-  clusterVersionRef: mongodb-5.0
-  componentSpecs:
-  - componentDefRef: mongodb
-    monitor: false
-    name: mongodb
-    noCreatePDB: false
-    replicas: 1
-    resources:
-      limits:
-        cpu: "0.5"
-        memory: 0.5Gi
-      requests:
-        cpu: "0.5"
-        memory: 0.5Gi
-    serviceAccountName: kb-mongodb
-    volumeClaimTemplates:
-    - name: data
-      spec:
-        accessModes:
-        - ReadWriteOnce
-        resources:
-          requests:
-            storage: 20Gi
-  terminationPolicy: Delete
-status:
-  clusterDefGeneration: 2
-  components:
-    mongodb:
-      consensusSetStatus:
-        leader:
-          accessMode: ReadWrite
-          name: primary
-          pod: mongodb-cluster-mongodb-0
-      phase: Running
-      podsReady: true
-      podsReadyTime: "2023-07-19T09:00:24Z"
-  conditions:
-  - lastTransitionTime: "2023-07-19T08:59:49Z"
-    message: 'The operator has started the provisioning of Cluster: mongodb-cluster'
-    observedGeneration: 1
-    reason: PreCheckSucceed
-    status: "True"
-    type: ProvisioningStarted
-  - lastTransitionTime: "2023-07-19T08:59:49Z"
-    message: Successfully applied for resources
-    observedGeneration: 1
-    reason: ApplyResourcesSucceed
-    status: "True"
-    type: ApplyResources
-  - lastTransitionTime: "2023-07-19T09:00:24Z"
-    message: all pods of components are ready, waiting for the probe detection successful
-    reason: AllReplicasReady
-    status: "True"
-    type: ReplicasReady
-  - lastTransitionTime: "2023-07-19T09:00:29Z"
-    message: 'Cluster: mongodb-cluster is ready, current phase is Running'
-    reason: ClusterReady
-    status: "True"
-    type: Ready
-  observedGeneration: 1
-  phase: Running
-```
-
-</details>
+   ```bash
+   kbcli cluster list -n demo
+   >
+   NAME        NAMESPACE   CLUSTER-DEFINITION   VERSION           TERMINATION-POLICY   STATUS    CREATED-TIME
+   mycluster   demo        mongodb              mongodb-5.0       Delete               Running   Sep 20,2024 10:01 UTC+0800
+   ```
 
 </TabItem>
 
@@ -310,19 +219,11 @@ status:
 
 <Tabs>
 
-<TabItem value="kbcli" label="kbcli" default>
-
-```bash
-kbcli cluster connect <clustername>  --namespace <name>
-```
-
-</TabItem>
-
-<TabItem value="kubectl" label="kubectl">
+<TabItem value="kubectl" label="kubectl" default>
 
 You can use `kubectl exec` to exec into a Pod and connect to a database.
 
-KubeBlocks operator has created a new Secret called `mongodb-cluster-conn-credential` to store the connection credential of the MongoDB cluster. This secret contains the following keys:
+KubeBlocks operator has created a new Secret called `mycluster-conn-credential` to store the connection credential of the MongoDB cluster. This secret contains the following keys:
 
 * `username`: the root username of the MongoDB cluster.
 * `password`: the password of the root user.
@@ -332,44 +233,52 @@ KubeBlocks operator has created a new Secret called `mongodb-cluster-conn-creden
 
 1. Get the `username` and `password` to connect to this MongoDB cluster for the `kubectl exec` command.
 
-```bash
-kubectl get secrets -n demo mongodb-cluster-conn-credential -o jsonpath='{.data.\username}' | base64 -d
->
-root
+   ```bash
+   kubectl get secrets -n demo mycluster-conn-credential -o jsonpath='{.data.username}' | base64 -d
+   >
+   root
 
-kubectl get secrets -n demo mongodb-cluster-conn-credential -o jsonpath='{.data.\password}' | base64 -d
->
-svk9xzqs
-```
+   kubectl get secrets -n demo mycluster-conn-credential -o jsonpath='{.data.password}' | base64 -d
+   >
+   266zfqx5
+   ```
 
-2. Exec into the Pod `mongodb-cluster-mongodb-0` and connect to the database using username and password.
+2. Exec into the Pod `mycluster-mongodb-0` and connect to the database using username and password.
 
-```bash
-kubectl exec -ti -n demo mongodb-cluster-mongodb-0 -- bash
+   ```bash
+   kubectl exec -ti -n demo mycluster-mongodb-0 -- bash
 
-root@mongodb-cluster-mongodb-0:/# mongo --username root --password svk9xzqs --authenticationDatabase admin
-```
+   root@mycluster-mongodb-0:/# mongo --username root --password 266zfqx5 --authenticationDatabase admin
+   ```
 
 </TabItem>
 
 <TabItem value="port-forward" label="port-forward">
 
-You can also port forward the service to connect to the database from your local machine. 
+You can also port forward the service to connect to the database from your local machine.
 
 1. Run the following command to port forward the service.
 
    ```bash
-   kubectl port-forward -n demo svc/mongodb-cluster-mongodb 27017:27017  
+   kubectl port-forward -n demo svc/mycluster-mongodb 27017:27017
    ```
 
 2. Open a new terminal and run the following command to connect to the database.
 
    ```bash
-   root@mongodb-cluster-mongodb-0:/# mongo --username root --password svk9xzqs --authenticationDatabase admin
+   root@mycluster-mongodb-0:/# mongo --username root --password 266zfqx5 --authenticationDatabase admin
    ```
+
+</TabItem>
+
+<TabItem value="kbcli" label="kbcli">
+
+```bash
+kbcli cluster connect mycluster -n demo
+```
 
 </TabItem>
 
 </Tabs>
 
-For the detailed database connection guide, refer to [Connect database](./../../connect_database/overview-of-database-connection.md).
+For the detailed database connection guide, refer to [Connect database](./../../../user_docs/connect_database/overview-of-database-connection.md).

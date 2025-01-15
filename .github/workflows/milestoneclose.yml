@@ -1,4 +1,4 @@
-name: Closed Milestones
+name: Milestones Closed
 
 on:
   milestone:
@@ -7,7 +7,7 @@ on:
 env:
   GITHUB_TOKEN: ${{ secrets.KUBEBLOCKS_TOKEN }}
   REPO: kubeblocks
-  milestone: 8
+  milestone: 10
   ORGANIZATION: apecloud
   PROJECT_NUMBER: 2
 

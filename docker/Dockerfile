@@ -1,7 +1,7 @@
 # Build the manager binary
 ARG DIST_IMG=gcr.io/distroless/static:nonroot
 
-ARG GO_VERSION=1.21
+ARG GO_VERSION=1.21-alpine
 
 FROM --platform=${BUILDPLATFORM} golang:${GO_VERSION} as builder
 
@@ -20,9 +20,22 @@ ARG TARGETARCH
 
 ARG GOPROXY
 #ARG GOPROXY=https://goproxy.cn
-ARG LD_FLAGS="-s -w"
-
 ENV GOPROXY=${GOPROXY}
+
+ARG VERSION
+ARG GIT_COMMIT
+ARG GIT_VERSION
+ARG BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+
+ENV VERSION=${VERSION}
+ENV GIT_COMMIT=${GIT_COMMIT}
+ENV GIT_VERSION=${GIT_VERSION}
+
+ARG LD_FLAGS="-s -w \
+    -X github.com/apecloud/kubeblocks/version.Version=${VERSION} \
+	-X github.com/apecloud/kubeblocks/version.BuildDate=${BUILD_DATE} \
+	-X github.com/apecloud/kubeblocks/version.GitCommit=${GIT_COMMIT} \
+	-X github.com/apecloud/kubeblocks/version.GitVersion=${GIT_VERSION}"
 
 WORKDIR /src
 # Copy the Go Modules manifests

@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -20,38 +20,27 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 package apps
 
 import (
+	appsv1 "github.com/apecloud/kubeblocks/apis/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-
-	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
 )
 
 type MockComponentFactory struct {
-	BaseFactory[appsv1alpha1.Component, *appsv1alpha1.Component, MockComponentFactory]
+	BaseFactory[appsv1.Component, *appsv1.Component, MockComponentFactory]
 }
 
 func NewComponentFactory(namespace, name, componentDefinition string) *MockComponentFactory {
 	f := &MockComponentFactory{}
 	f.Init(namespace, name,
-		&appsv1alpha1.Component{
-			Spec: appsv1alpha1.ComponentSpec{
+		&appsv1.Component{
+			Spec: appsv1.ComponentSpec{
 				CompDef: componentDefinition,
 			},
 		}, f)
 	return f
 }
 
-func (factory *MockComponentFactory) SetAffinity(affinity *appsv1alpha1.Affinity) *MockComponentFactory {
-	factory.Get().Spec.Affinity = affinity
-	return factory
-}
-
-func (factory *MockComponentFactory) AddToleration(toleration corev1.Toleration) *MockComponentFactory {
-	tolerations := factory.Get().Spec.Tolerations
-	if len(tolerations) == 0 {
-		tolerations = []corev1.Toleration{}
-	}
-	tolerations = append(tolerations, toleration)
-	factory.Get().Spec.Tolerations = tolerations
+func (factory *MockComponentFactory) SetServiceVersion(serviceVersion string) *MockComponentFactory {
+	factory.Get().Spec.ServiceVersion = serviceVersion
 	return factory
 }
 
@@ -70,19 +59,14 @@ func (factory *MockComponentFactory) SetResources(resources corev1.ResourceRequi
 	return factory
 }
 
-func (factory *MockComponentFactory) SetEnabledLogs(logName ...string) *MockComponentFactory {
-	factory.Get().Spec.EnabledLogs = logName
-	return factory
-}
+// func (factory *MockComponentFactory) SetMonitor(monitor bool) *MockComponentFactory {
+// 	factory.Get().Spec.Monitor = monitor
+// 	return factory
+// }
 
-func (factory *MockComponentFactory) SetMonitor(monitor bool) *MockComponentFactory {
-	factory.Get().Spec.Monitor = monitor
-	return factory
-}
-
-func (factory *MockComponentFactory) SetTLSConfig(enable bool, issuer *appsv1alpha1.Issuer) *MockComponentFactory {
+func (factory *MockComponentFactory) SetTLSConfig(enable bool, issuer *appsv1.Issuer) *MockComponentFactory {
 	if enable {
-		factory.Get().Spec.TLSConfig = &appsv1alpha1.TLSConfig{
+		factory.Get().Spec.TLSConfig = &appsv1.TLSConfig{
 			Enable: enable,
 			Issuer: issuer,
 		}
@@ -91,8 +75,8 @@ func (factory *MockComponentFactory) SetTLSConfig(enable bool, issuer *appsv1alp
 }
 
 func (factory *MockComponentFactory) AddVolumeClaimTemplate(volumeName string,
-	pvcSpec appsv1alpha1.PersistentVolumeClaimSpec) *MockComponentFactory {
-	factory.Get().Spec.VolumeClaimTemplates = append(factory.Get().Spec.VolumeClaimTemplates, appsv1alpha1.ClusterComponentVolumeClaimTemplate{
+	pvcSpec appsv1.PersistentVolumeClaimSpec) *MockComponentFactory {
+	factory.Get().Spec.VolumeClaimTemplates = append(factory.Get().Spec.VolumeClaimTemplates, appsv1.ClusterComponentVolumeClaimTemplate{
 		Name: volumeName,
 		Spec: pvcSpec,
 	})

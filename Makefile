@@ -15,13 +15,14 @@
 # Variables                                                                    #
 ################################################################################
 APP_NAME = kubeblocks
-VERSION ?= 0.8.0-alpha.0
+VERSION ?= 1.0.0-alpha.0
 GITHUB_PROXY ?=
 INIT_ENV ?= false
 TEST_TYPE ?= wesql
 GIT_COMMIT  = $(shell git rev-list -1 HEAD)
 GIT_VERSION = $(shell git describe --always --abbrev=0 --tag)
 GENERATED_CLIENT_PKG = "pkg/client"
+GENERATED_DEEP_COPY_FILE = "zz_generated.deepcopy.go"
 # Setting SHELL to bash allows bash commands to be executed by recipes.
 # This is a requirement for 'setup-envtest.sh' in the test target.
 # Options are set to exit when a recipe line exits non-zero or a piped command fails.
@@ -29,7 +30,7 @@ SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
 
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
-ENVTEST_K8S_VERSION = 1.25.0
+ENVTEST_K8S_VERSION = 1.26.1
 ENABLE_WEBHOOKS ?= false
 SKIP_GO_GEN ?= true
 CHART_PATH = deploy/helm
@@ -62,7 +63,11 @@ endif
 export GOPROXY
 
 
-LD_FLAGS="-s -w -X main.version=v${VERSION} -X main.buildDate=`date -u +'%Y-%m-%dT%H:%M:%SZ'` -X main.gitCommit=`git rev-parse HEAD`"
+LD_FLAGS="-s -w \
+	-X github.com/apecloud/kubeblocks/version.Version=v${VERSION} \
+	-X github.com/apecloud/kubeblocks/version.BuildDate=`date -u +'%Y-%m-%dT%H:%M:%SZ'` \
+	-X github.com/apecloud/kubeblocks/version.GitCommit=${GIT_COMMIT} \
+	-X github.com/apecloud/kubeblocks/version.GitVersion=${GIT_VERSION}"
 # Which architecture to build - see $(ALL_ARCH) for options.
 # if the 'local' rule is being run, detect the ARCH from 'go env'
 # if it wasn't specified by the caller.
@@ -113,7 +118,7 @@ help: ## Display this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z_0-9-]+:.*?##/ { printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
 
 .PHONY: all
-all: manager dataprotection  lorry reloader ## Make all cmd binaries.
+all: manager dataprotection kbagent ## Make all cmd binaries.
 
 ##@ Development
 
@@ -159,10 +164,10 @@ test-go-generate: ## Run go generate against test code.
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.
-	$(GOFMT) -l -w -s $$(git ls-files --exclude-standard | grep "\.go$$" | grep -v $(GENERATED_CLIENT_PKG))
+	$(GOFMT) -l -w -s $$(git ls-files --exclude-standard | grep "\.go$$" | grep -v $(GENERATED_CLIENT_PKG) | grep -v $(GENERATED_DEEP_COPY_FILE))
 
 .PHONY: vet
-vet: ## Run go vet against code.
+vet: test-go-generate ## Run go vet against code.
 	GOOS=$(GOOS) $(GO) vet -mod=mod ./...
 
 .PHONY: cue-fmt
@@ -229,10 +234,6 @@ test: manifests generate test-go-generate add-k8s-host test-fast ## Run tests. i
 race:
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" $(GO) test -race $(TEST_PACKAGES)
 
-.PHONY: test-integration
-test-integration: manifests generate envtest add-k8s-host ## Run tests. if existing k8s cluster is k3d or minikube, specify EXISTING_CLUSTER_TYPE.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" $(GO) test ./test/integration
-
 .PHONY: test-delve
 test-delve: manifests generate envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" dlv --listen=:$(DEBUG_PORT) --headless=true --api-version=2 --accept-multiclient test $(TEST_PACKAGES)
@@ -252,17 +253,14 @@ endif
 
 .PHONY: goimports
 goimports: goimportstool ## Run goimports against code.
-	$(GOIMPORTS) -local github.com/apecloud/kubeblocks -w $$(git ls-files|grep "\.go$$" | grep -v $(GENERATED_CLIENT_PKG))
-
-
-.PHONY: lorryctl-doc
-lorryctl-doc: generate test-go-generate ## generate CLI command reference manual.
-	$(GO) run ./hack/docgen/lorryctl/main.go ./docs/user_docs/lorryctl
+	$(GOIMPORTS) -local github.com/apecloud/kubeblocks -w $$(git ls-files|grep "\.go$$" | grep -v $(GENERATED_CLIENT_PKG) | grep -v $(GENERATED_DEEP_COPY_FILE))
 
 .PHONY: api-doc
 api-doc:  ## generate API reference manual.
-	@./hack/docgen/api/generate.sh
+	$(GO) run ./hack/docgen/api/main.go -api-dir github.com/apecloud/kubeblocks/apis -config ./hack/docgen/api/gen-api-doc-config.json -template-dir ./hack/docgen/api/template -out-dir ./docs/developer_docs/api-reference/
 
+.PHONY: doc
+doc: api-doc ## generate all documents.
 
 ##@ Operator Controller Manager
 
@@ -273,6 +271,14 @@ manager: cue-fmt generate manager-go-generate test-go-generate build-checks ## B
 .PHONY: dataprotection
 dataprotection: generate test-go-generate build-checks ## Build dataprotection binary.
 	$(GO) build -ldflags=${LD_FLAGS} -o bin/dataprotection ./cmd/dataprotection/main.go
+
+.PHONY: kbagent
+kbagent: generate test-go-generate build-checks
+	$(GO) build -ldflags=${LD_FLAGS} -o bin/kbagent ./cmd/kbagent/main.go
+
+.PHONY: helmhook
+helmhook:
+	$(GO) build -o bin/helmhook ./cmd/helmhook/main.go
 
 CERT_ROOT_CA ?= $(WEBHOOK_CERT_DIR)/rootCA.key
 .PHONY: webhook-cert
@@ -390,7 +396,7 @@ ENVTEST ?= $(LOCALBIN)/setup-envtest
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.1.1
-CONTROLLER_TOOLS_VERSION ?= v0.12.1
+CONTROLLER_TOOLS_VERSION ?= v0.14.0
 CUE_VERSION ?= v0.4.3
 
 KUSTOMIZE_INSTALL_SCRIPT ?= "$(GITHUB_PROXY)https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh"
@@ -416,7 +422,7 @@ controller-gen: $(LOCALBIN) ## Download controller-gen locally if necessary.
 envtest: $(ENVTEST) ## Download envtest-setup locally if necessary.
 $(ENVTEST): $(LOCALBIN)
 ifeq (, $(shell ls $(LOCALBIN)/setup-envtest 2>/dev/null))
-	GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+	GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.0.0-20240320141353-395cfc7486e6
 endif
 
 .PHONY: install-docker-buildx
@@ -429,7 +435,7 @@ install-docker-buildx: ## Create `docker buildx` builder.
 	fi
 
 .PHONY: golangci
-golangci: GOLANGCILINT_VERSION = v1.54.2
+golangci: GOLANGCILINT_VERSION = v1.55.2
 golangci: ## Download golangci-lint locally if necessary.
 ifneq ($(shell which golangci-lint),)
 	@echo golangci-lint is already installed
@@ -566,10 +572,10 @@ else ifeq ($(TEST_TYPE), oceanbase)
 	$(HELM) dependency build $(addonsPath)/oceanbase-cluster --skip-refresh
 	$(HELM) upgrade --install oceanbase $(addonsPath)/oceanbase
 	$(HELM) template oceanbase-cluster $(addonsPath)/oceanbase-cluster > test/e2e/testdata/smoketest/oceanbase/00_oceanbasecluster.yaml
-else ifeq ($(TEST_TYPE), official-postgresql)
-	$(HELM) dependency build $(addonsPath)/official-postgresql-cluster --skip-refresh
-	$(HELM) upgrade --install official-postgresql $(addonsPath)/official-postgresql
-	$(HELM) template official-pg $(addonsPath)/official-postgresql-cluster > test/e2e/testdata/smoketest/official-postgresql/00_official_pgcluster.yaml
+else ifeq ($(TEST_TYPE), vanilla-postgresql)
+	$(HELM) dependency build $(addonsPath)/vanilla-postgresql-cluster --skip-refresh
+	$(HELM) upgrade --install vanilla-postgresql $(addonsPath)/vanilla-postgresql
+	$(HELM) template vanilla-pg $(addonsPath)/vanilla-postgresql-cluster > test/e2e/testdata/smoketest/vanilla-postgresql/00_official_pgcluster.yaml
 else ifeq ($(TEST_TYPE), openldap)
 	$(HELM) dependency build $(addonsPath)/openldap-cluster --skip-refresh
 	$(HELM) upgrade --install openldap $(addonsPath)/openldap
@@ -666,7 +672,7 @@ else ifeq ($(TEST_TYPE), foxlake)
 else ifeq ($(TEST_TYPE), oceanbase)
 	$(HELM) upgrade --install oceanbase $(addonsPath)/oceanbase
 else ifeq ($(TEST_TYPE), oceanbase)
-	$(HELM) upgrade --install official-postgresql $(addonsPath)/official-postgresql
+	$(HELM) upgrade --install vanilla-postgresql $(addonsPath)/vanilla-postgresql
 else ifeq ($(TEST_TYPE), openldap)
 	$(HELM) upgrade --install openldap $(addonsPath)/openldap
 else ifeq ($(TEST_TYPE), weaviate)

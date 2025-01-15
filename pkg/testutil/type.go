@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -21,7 +21,6 @@ package testutil
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"time"
 
@@ -30,11 +29,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/version"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	"github.com/apecloud/kubeblocks/pkg/constant"
 	viper "github.com/apecloud/kubeblocks/pkg/viperx"
 )
 
@@ -53,8 +50,6 @@ type TestContext struct {
 	CreateObj                          func(ctx context.Context, obj client.Object, opts ...client.CreateOption) error
 	CheckedCreateObj                   func(ctx context.Context, obj client.Object, opts ...client.CreateOption) error
 }
-
-var ErrUninitError = fmt.Errorf("cli uninitialized error")
 
 const (
 	envExistingClusterType   = "EXISTING_CLUSTER_TYPE"
@@ -185,24 +180,4 @@ func (testCtx TestContext) UseDefaultNamespace() func(client.Object) {
 	return func(obj client.Object) {
 		obj.SetNamespace(testCtx.DefaultNamespace)
 	}
-}
-
-// SetKubeServerVersionWithDistro provides "_KUBE_SERVER_INFO" viper settings helper function.
-func SetKubeServerVersionWithDistro(major, minor, patch, distro string) {
-	ver := version.Info{
-		Major:      major,
-		Minor:      minor,
-		GitVersion: fmt.Sprintf("v%s.%s.%s+%s", major, minor, patch, distro),
-	}
-	viper.Set(constant.CfgKeyServerInfo, ver)
-}
-
-// SetKubeServerVersion provides "_KUBE_SERVER_INFO" viper settings helper function.
-func SetKubeServerVersion(major, minor, patch string) {
-	ver := version.Info{
-		Major:      major,
-		Minor:      minor,
-		GitVersion: fmt.Sprintf("v%s.%s.%s", major, minor, patch),
-	}
-	viper.Set(constant.CfgKeyServerInfo, ver)
 }

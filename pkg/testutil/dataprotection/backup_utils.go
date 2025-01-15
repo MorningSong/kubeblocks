@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -24,7 +24,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -33,7 +32,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	dpv1alpha1 "github.com/apecloud/kubeblocks/apis/dataprotection/v1alpha1"
-	storagev1alpha1 "github.com/apecloud/kubeblocks/apis/storage/v1alpha1"
 	"github.com/apecloud/kubeblocks/pkg/constant"
 	"github.com/apecloud/kubeblocks/pkg/dataprotection/utils/boolptr"
 	"github.com/apecloud/kubeblocks/pkg/testutil"
@@ -42,9 +40,14 @@ import (
 	viper "github.com/apecloud/kubeblocks/pkg/viperx"
 )
 
-func NewFakeActionSet(testCtx *testutil.TestContext) *dpv1alpha1.ActionSet {
+func NewFakeActionSet(testCtx *testutil.TestContext, change func(as *dpv1alpha1.ActionSet)) *dpv1alpha1.ActionSet {
 	as := testapps.CreateCustomizedObj(testCtx, "backup/actionset.yaml",
-		&dpv1alpha1.ActionSet{}, testapps.WithName(ActionSetName))
+		&dpv1alpha1.ActionSet{}, func(obj *dpv1alpha1.ActionSet) {
+			obj.Name = ActionSetName
+			if change != nil {
+				change(obj)
+			}
+		})
 	Eventually(testapps.CheckObj(testCtx, client.ObjectKeyFromObject(as),
 		func(g Gomega, as *dpv1alpha1.ActionSet) {
 			g.Expect(as.Status.Phase).Should(BeEquivalentTo(dpv1alpha1.AvailablePhase))
@@ -53,7 +56,8 @@ func NewFakeActionSet(testCtx *testutil.TestContext) *dpv1alpha1.ActionSet {
 }
 
 func NewFakeBackupPolicy(testCtx *testutil.TestContext,
-	change func(backupPolicy *dpv1alpha1.BackupPolicy)) *dpv1alpha1.BackupPolicy {
+	change func(backupPolicy *dpv1alpha1.BackupPolicy),
+	doNotExpectAvailable ...bool) *dpv1alpha1.BackupPolicy {
 	bp := NewBackupPolicyFactory(testCtx.DefaultNamespace, BackupPolicyName).
 		SetBackupRepoName(BackupRepoName).
 		SetTarget(constant.AppInstanceLabelKey, ClusterName,
@@ -64,6 +68,10 @@ func NewFakeBackupPolicy(testCtx *testutil.TestContext,
 		AddBackupMethod(BackupMethodName, false, ActionSetName).
 		SetBackupMethodVolumeMounts(DataVolumeName, DataVolumeMountPath,
 			LogVolumeName, LogVolumeMountPath).
+		AddBackupMethod(IncBackupMethodName, false, IncActionSetName).
+		SetBackupMethodVolumeMounts(DataVolumeName, DataVolumeMountPath,
+			LogVolumeName, LogVolumeMountPath).
+		SetBackupMethodCompatibleMethod(BackupMethodName).
 		AddBackupMethod(VSBackupMethodName, true, "").
 		SetBackupMethodVolumes([]string{DataVolumeName}).
 		Apply(change).
@@ -79,6 +87,9 @@ func NewFakeBackupPolicy(testCtx *testutil.TestContext,
 		},
 	}
 	Expect(testCtx.CreateObj(testCtx.Ctx, secret)).Should(Succeed())
+	if len(doNotExpectAvailable) > 0 && doNotExpectAvailable[0] {
+		return bp
+	}
 	Eventually(testapps.CheckObj(testCtx, client.ObjectKeyFromObject(bp),
 		func(g Gomega, bp *dpv1alpha1.BackupPolicy) {
 			g.Expect(bp.Status.Phase).Should(BeEquivalentTo(dpv1alpha1.AvailablePhase))
@@ -87,9 +98,9 @@ func NewFakeBackupPolicy(testCtx *testutil.TestContext,
 }
 
 func NewFakeStorageProvider(testCtx *testutil.TestContext,
-	change func(sp *storagev1alpha1.StorageProvider)) *storagev1alpha1.StorageProvider {
+	change func(sp *dpv1alpha1.StorageProvider)) *dpv1alpha1.StorageProvider {
 	sp := testapps.CreateCustomizedObj(testCtx, "backup/storageprovider.yaml",
-		&storagev1alpha1.StorageProvider{}, func(obj *storagev1alpha1.StorageProvider) {
+		&dpv1alpha1.StorageProvider{}, func(obj *dpv1alpha1.StorageProvider) {
 			obj.Name = StorageProviderName
 			if change != nil {
 				change(obj)
@@ -97,9 +108,9 @@ func NewFakeStorageProvider(testCtx *testutil.TestContext,
 		})
 	// the storage provider controller is not running, so set the status manually
 	Expect(testapps.ChangeObjStatus(testCtx, sp, func() {
-		sp.Status.Phase = storagev1alpha1.StorageProviderReady
+		sp.Status.Phase = dpv1alpha1.StorageProviderReady
 		meta.SetStatusCondition(&sp.Status.Conditions, metav1.Condition{
-			Type:   storagev1alpha1.ConditionTypeCSIDriverInstalled,
+			Type:   dpv1alpha1.ConditionTypeCSIDriverInstalled,
 			Status: metav1.ConditionTrue,
 			Reason: "CSIDriverInstalled",
 		})
@@ -173,9 +184,10 @@ func NewFakeCluster(testCtx *testutil.TestContext) *BackupClusterInfo {
 	}
 
 	By("mocking a cluster")
-	cluster := testapps.NewClusterFactory(testCtx.DefaultNamespace, ClusterName,
-		"test-cd", "test-cv").
+	cluster := testapps.NewClusterFactory(testCtx.DefaultNamespace, ClusterName, "").
 		AddLabels(constant.AppInstanceLabelKey, ClusterName).
+		AddComponent("test-cmp", "test-cmpd").
+		AddSystemAccount("test-account", nil, nil).
 		Create(testCtx).GetObject()
 	podName := ClusterName + "-" + ComponentName
 
@@ -193,7 +205,9 @@ func NewFakeCluster(testCtx *testutil.TestContext) *BackupClusterInfo {
 		PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvc.Name}}}
 	pod := podFactory(podName + "-0").
 		AddRoleLabel("leader").
-		AddVolume(volume).
+		AddVolume(volume).AddContainer(corev1.Container{Name: ContainerName + "-1", Image: testapps.ApeCloudMySQLImage,
+		Ports: []corev1.ContainerPort{{Protocol: ProtocolName, ContainerPort: PortNum + 1},
+			{Name: PortName, Protocol: ProtocolName, ContainerPort: PortNum}}}).
 		Create(testCtx).GetObject()
 	Expect(testapps.ChangeObjStatus(testCtx, pod, func() {
 		pod.Status.Phase = corev1.PodRunning
@@ -205,7 +219,9 @@ func NewFakeCluster(testCtx *testutil.TestContext) *BackupClusterInfo {
 		PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvc1.Name}}}
 	pod1 := podFactory(podName + "-1").
 		AddRoleLabel("follower").
-		AddVolume(volume2).
+		AddVolume(volume2).AddContainer(corev1.Container{Name: ContainerName + "-1", Image: testapps.ApeCloudMySQLImage,
+		Ports: []corev1.ContainerPort{{Protocol: ProtocolName, ContainerPort: PortNum + 1},
+			{Name: PortName, Protocol: ProtocolName, ContainerPort: PortNum}}}).
 		Create(testCtx).GetObject()
 	Expect(testapps.ChangeObjStatus(testCtx, pod1, func() {
 		pod1.Status.Phase = corev1.PodRunning
@@ -247,7 +263,6 @@ func EnableBackupSchedule(testCtx *testutil.TestContext,
 		for i := range schedule.Spec.Schedules {
 			if schedule.Spec.Schedules[i].BackupMethod == method {
 				schedule.Spec.Schedules[i].Enabled = boolptr.True()
-				break
 			}
 		}
 	})).Should(Succeed())
@@ -266,6 +281,39 @@ func MockBackupStatusMethod(backup *dpv1alpha1.Backup, backupMethodName, targetV
 			Volumes: []string{targetVolume},
 			VolumeMounts: []corev1.VolumeMount{
 				{Name: targetVolume, MountPath: "/"},
+			},
+		},
+	}
+	if backupMethodName == IncBackupMethodName {
+		backup.Status.BackupMethod.CompatibleMethod = BackupMethodName
+	}
+}
+
+func MockBackupStatusTarget(backup *dpv1alpha1.Backup, podSelectionStrategy dpv1alpha1.PodSelectionStrategy) {
+	backup.Status.Target = &dpv1alpha1.BackupStatusTarget{
+		BackupTarget: dpv1alpha1.BackupTarget{
+			PodSelector: &dpv1alpha1.PodSelector{
+				LabelSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{
+						constant.AppInstanceLabelKey:    ClusterName,
+						constant.KBAppComponentLabelKey: ComponentName,
+					},
+				},
+				Strategy: podSelectionStrategy,
+			},
+		},
+	}
+}
+
+func MockBackupVSStatusActions(backup *dpv1alpha1.Backup) {
+	backup.Status.Actions = []dpv1alpha1.ActionStatus{
+		{
+			Name: "create-volumesnapshot",
+			VolumeSnapshots: []dpv1alpha1.VolumeSnapshotStatus{
+				{
+					Name:       "test-volumesnapshot",
+					VolumeName: DataVolumeName,
+				},
 			},
 		},
 	}

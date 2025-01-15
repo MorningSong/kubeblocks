@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -21,22 +21,99 @@ package component
 
 import (
 	"context"
+	"fmt"
+	"maps"
 	"reflect"
+	"strconv"
+	"strings"
 
-	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
-	workloads "github.com/apecloud/kubeblocks/apis/workloads/v1alpha1"
+	appsv1 "github.com/apecloud/kubeblocks/apis/apps/v1"
+	workloads "github.com/apecloud/kubeblocks/apis/workloads/v1"
 	"github.com/apecloud/kubeblocks/pkg/constant"
-	client2 "github.com/apecloud/kubeblocks/pkg/controller/client"
+	"github.com/apecloud/kubeblocks/pkg/controller/instanceset"
 	"github.com/apecloud/kubeblocks/pkg/generics"
 )
 
-func ListObjWithLabelsInNamespace[T generics.Object, PT generics.PObject[T], L generics.ObjList[T], PL generics.PObjList[T, L]](
-	ctx context.Context, cli client.Reader, _ func(T, PT, L, PL), namespace string, labels client.MatchingLabels) ([]PT, error) {
+func ListOwnedWorkloads(ctx context.Context, cli client.Reader, namespace, clusterName, compName string) ([]*workloads.InstanceSet, error) {
+	return listWorkloads(ctx, cli, namespace, clusterName, compName)
+}
+
+func ListOwnedPods(ctx context.Context, cli client.Reader, namespace, clusterName, compName string,
+	opts ...client.ListOption) ([]*corev1.Pod, error) {
+	return listPods(ctx, cli, namespace, clusterName, compName, nil, opts...)
+}
+
+func ListOwnedPodsWithRole(ctx context.Context, cli client.Reader, namespace, clusterName, compName, role string,
+	opts ...client.ListOption) ([]*corev1.Pod, error) {
+	roleLabel := map[string]string{constant.RoleLabelKey: role}
+	return listPods(ctx, cli, namespace, clusterName, compName, roleLabel, opts...)
+}
+
+func ListOwnedPVCs(ctx context.Context, cli client.Reader, namespace, clusterName, compName string,
+	opts ...client.ListOption) ([]*corev1.PersistentVolumeClaim, error) {
+	labels := constant.GetCompLabels(clusterName, compName)
+	if opts == nil {
+		opts = make([]client.ListOption, 0)
+	}
+	opts = append(opts, inDataContext())
+	return listObjWithLabelsInNamespace(ctx, cli, generics.PersistentVolumeClaimSignature, namespace, labels, opts...)
+}
+
+func ListOwnedServices(ctx context.Context, cli client.Reader, namespace, clusterName, compName string,
+	opts ...client.ListOption) ([]*corev1.Service, error) {
+	labels := constant.GetCompLabels(clusterName, compName)
+	if opts == nil {
+		opts = make([]client.ListOption, 0)
+	}
+	opts = append(opts, inDataContext())
+	return listObjWithLabelsInNamespace(ctx, cli, generics.ServiceSignature, namespace, labels, opts...)
+}
+
+// GetMinReadySeconds gets the underlying workload's minReadySeconds of the component.
+func GetMinReadySeconds(ctx context.Context, cli client.Client, cluster appsv1.Cluster, compName string) (minReadySeconds int32, err error) {
+	var its []*workloads.InstanceSet
+	its, err = listWorkloads(ctx, cli, cluster.Namespace, cluster.Name, compName)
+	if err != nil {
+		return
+	}
+	if len(its) > 0 {
+		minReadySeconds = its[0].Spec.MinReadySeconds
+		return
+	}
+	return minReadySeconds, err
+}
+
+func listWorkloads(ctx context.Context, cli client.Reader, namespace, clusterName, compName string) ([]*workloads.InstanceSet, error) {
+	labels := constant.GetCompLabels(clusterName, compName)
+	return listObjWithLabelsInNamespace(ctx, cli, generics.InstanceSetSignature, namespace, labels)
+}
+
+func listPods(ctx context.Context, cli client.Reader, namespace, clusterName, compName string,
+	labels map[string]string, opts ...client.ListOption) ([]*corev1.Pod, error) {
+	if labels == nil {
+		labels = constant.GetCompLabels(clusterName, compName)
+	} else {
+		maps.Copy(labels, constant.GetCompLabels(clusterName, compName))
+	}
+	if opts == nil {
+		opts = make([]client.ListOption, 0)
+	}
+	opts = append(opts, inDataContext())
+	return listObjWithLabelsInNamespace(ctx, cli, generics.PodSignature, namespace, labels, opts...)
+}
+
+func listObjWithLabelsInNamespace[T generics.Object, PT generics.PObject[T], L generics.ObjList[T], PL generics.PObjList[T, L]](
+	ctx context.Context, cli client.Reader, _ func(T, PT, L, PL), namespace string, labels client.MatchingLabels, opts ...client.ListOption) ([]PT, error) {
+	if opts == nil {
+		opts = make([]client.ListOption, 0)
+	}
+	opts = append(opts, []client.ListOption{labels, client.InNamespace(namespace)}...)
+
 	var objList L
-	if err := cli.List(ctx, PL(&objList), labels, client.InNamespace(namespace)); err != nil {
+	if err := cli.List(ctx, PL(&objList), opts...); err != nil {
 		return nil, err
 	}
 
@@ -48,60 +125,60 @@ func ListObjWithLabelsInNamespace[T generics.Object, PT generics.PObject[T], L g
 	return objs, nil
 }
 
-func ListRSMOwnedByComponent(ctx context.Context, cli client.Client, namespace string, labels client.MatchingLabels) ([]*workloads.ReplicatedStateMachine, error) {
-	return ListObjWithLabelsInNamespace(ctx, cli, generics.RSMSignature, namespace, labels)
+// GenerateAllPodNames generate all pod names for a component.
+func GenerateAllPodNames(
+	compReplicas int32,
+	instances []appsv1.InstanceTemplate,
+	offlineInstances []string,
+	fullCompName string) ([]string, error) {
+	var templates []instanceset.InstanceTemplate
+	for i := range instances {
+		templates = append(templates, &workloads.InstanceTemplate{
+			Name:     instances[i].Name,
+			Replicas: instances[i].Replicas,
+		})
+	}
+	return instanceset.GenerateAllInstanceNames(fullCompName, compReplicas, templates, offlineInstances, appsv1.Ordinals{})
 }
 
-// GetObjectListByComponentName gets k8s workload list with component
-func GetObjectListByComponentName(ctx context.Context, cli client2.ReadonlyClient, cluster appsv1alpha1.Cluster,
-	objectList client.ObjectList, componentName string) error {
-	matchLabels := constant.GetComponentWellKnownLabels(cluster.Name, componentName)
-	inNamespace := client.InNamespace(cluster.Namespace)
-	return cli.List(ctx, objectList, client.MatchingLabels(matchLabels), inNamespace)
+// GenerateAllPodNamesToSet generate all pod names for a component
+// and return a set which key is the pod name and value is a template name.
+func GenerateAllPodNamesToSet(
+	compReplicas int32,
+	instances []appsv1.InstanceTemplate,
+	offlineInstances []string,
+	clusterName,
+	fullCompName string) (map[string]string, error) {
+	compName := constant.GenerateClusterComponentName(clusterName, fullCompName)
+	instanceNames, err := GenerateAllPodNames(compReplicas, instances, offlineInstances, compName)
+	if err != nil {
+		return nil, err
+	}
+	// key: podName, value: templateName
+	podSet := map[string]string{}
+	for _, insName := range instanceNames {
+		podSet[insName] = appsv1.GetInstanceTemplateName(clusterName, fullCompName, insName)
+	}
+	return podSet, nil
 }
 
-// GetComponentDeployMinReadySeconds gets the deployment minReadySeconds of the component.
-func GetComponentDeployMinReadySeconds(ctx context.Context,
-	cli client.Client,
-	cluster appsv1alpha1.Cluster,
-	componentName string) (minReadySeconds int32, err error) {
-	deployList := &appsv1.DeploymentList{}
-	if err = GetObjectListByComponentName(ctx, cli, cluster, deployList, componentName); err != nil {
-		return
+func GetTemplateNameAndOrdinal(workloadName, podName string) (string, int32, error) {
+	podSuffix := strings.Replace(podName, workloadName+"-", "", 1)
+	lastDashIndex := strings.LastIndex(podSuffix, "-")
+	if lastDashIndex == len(podSuffix)-1 {
+		return "", 0, fmt.Errorf("no pod ordinal found after the last dash")
 	}
-	if len(deployList.Items) > 0 {
-		minReadySeconds = deployList.Items[0].Spec.MinReadySeconds
-		return
+	templateName := ""
+	indexStr := ""
+	if lastDashIndex == -1 {
+		indexStr = podSuffix
+	} else {
+		templateName = podSuffix[0:lastDashIndex]
+		indexStr = podSuffix[lastDashIndex+1:]
 	}
-	return minReadySeconds, err
-}
-
-// GetComponentStsMinReadySeconds gets the statefulSet minReadySeconds of the component.
-func GetComponentStsMinReadySeconds(ctx context.Context,
-	cli client.Client,
-	cluster appsv1alpha1.Cluster,
-	componentName string) (minReadySeconds int32, err error) {
-	stsList := &appsv1.StatefulSetList{}
-	if err = GetObjectListByComponentName(ctx, cli, cluster, stsList, componentName); err != nil {
-		return
+	index, err := strconv.Atoi(indexStr)
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to obtain pod ordinal")
 	}
-	if len(stsList.Items) > 0 {
-		minReadySeconds = stsList.Items[0].Spec.MinReadySeconds
-		return
-	}
-	return minReadySeconds, err
-}
-
-// GetComponentWorkloadMinReadySeconds gets the workload minReadySeconds of the component.
-func GetComponentWorkloadMinReadySeconds(ctx context.Context,
-	cli client.Client,
-	cluster appsv1alpha1.Cluster,
-	workloadType appsv1alpha1.WorkloadType,
-	componentName string) (minReadySeconds int32, err error) {
-	switch workloadType {
-	case appsv1alpha1.Stateless:
-		return GetComponentDeployMinReadySeconds(ctx, cli, cluster, componentName)
-	default:
-		return GetComponentStsMinReadySeconds(ctx, cli, cluster, componentName)
-	}
+	return templateName, int32(index), nil
 }

@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -21,10 +21,8 @@ package configuration
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/sethvargo/go-password/password"
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -34,64 +32,32 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
-	workloads "github.com/apecloud/kubeblocks/apis/workloads/v1alpha1"
+	appsv1 "github.com/apecloud/kubeblocks/apis/apps/v1"
+	appsv1beta1 "github.com/apecloud/kubeblocks/apis/apps/v1beta1"
+	workloads "github.com/apecloud/kubeblocks/apis/workloads/v1"
 	"github.com/apecloud/kubeblocks/pkg/configuration/core"
+	"github.com/apecloud/kubeblocks/pkg/controller/component"
 	intctrlutil "github.com/apecloud/kubeblocks/pkg/controllerutil"
 )
 
 var (
 	defaultNamespace = "default"
-	stsSchemaKind    = appsv1.SchemeGroupVersion.WithKind("StatefulSet")
+	itsSchemaKind    = workloads.GroupVersion.WithKind(workloads.InstanceSetKind)
 )
 
-func newMockDeployments(replicas int, name string, labels map[string]string) appsv1.Deployment {
+func newMockInstanceSet(replicas int, name string, labels map[string]string) workloads.InstanceSet {
 	uid, _ := password.Generate(12, 12, 0, true, false)
-	return appsv1.Deployment{
+	return workloads.InstanceSet{
 		TypeMeta: metav1.TypeMeta{
-			Kind:       "StatefulSet",
-			APIVersion: "apps/v1",
+			Kind:       workloads.InstanceSetKind,
+			APIVersion: workloads.GroupVersion.String(),
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: defaultNamespace,
 			UID:       types.UID(uid),
 		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: func() *int32 { i := int32(replicas); return &i }(),
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: labels,
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{},
-					Volumes: []corev1.Volume{{
-						Name: "for_test",
-						VolumeSource: corev1.VolumeSource{
-							HostPath: &corev1.HostPathVolumeSource{
-								Path: "/tmp",
-							},
-						}}},
-				},
-			},
-		},
-	}
-}
-
-func newMockStatefulSet(replicas int, name string, labels map[string]string) appsv1.StatefulSet {
-	uid, _ := password.Generate(12, 12, 0, true, false)
-	serviceName, _ := password.Generate(12, 0, 0, true, false)
-	return appsv1.StatefulSet{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "StatefulSet",
-			APIVersion: "apps/v1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: defaultNamespace,
-			UID:       types.UID(uid),
-		},
-		Spec: appsv1.StatefulSetSpec{
+		Spec: workloads.InstanceSetSpec{
 			Selector: &metav1.LabelSelector{
 				MatchLabels: labels,
 			},
@@ -111,36 +77,25 @@ func newMockStatefulSet(replicas int, name string, labels map[string]string) app
 						}}},
 				},
 			},
-			ServiceName: serviceName,
 		},
 	}
 }
 
 type ParamsOps func(params *reconfigureParams)
 
-func withMockStatefulSet(replicas int, labels map[string]string) ParamsOps {
+func withMockInstanceSet(replicas int, labels map[string]string) ParamsOps {
 	return func(params *reconfigureParams) {
 		rand, _ := password.Generate(12, 8, 0, true, false)
-		stsName := "test_" + rand
-		params.ComponentUnits = []appsv1.StatefulSet{
-			newMockStatefulSet(replicas, stsName, labels),
-		}
-	}
-}
-
-func withMockDeployments(replicas int, labels map[string]string) ParamsOps {
-	return func(params *reconfigureParams) {
-		rand, _ := password.Generate(12, 8, 0, true, false)
-		deployName := "test_" + rand
-		params.DeploymentUnits = []appsv1.Deployment{
-			newMockDeployments(replicas, deployName, labels),
+		itsName := "test_" + rand
+		params.InstanceSetUnits = []workloads.InstanceSet{
+			newMockInstanceSet(replicas, itsName, labels),
 		}
 	}
 }
 
 func withClusterComponent(replicas int) ParamsOps {
 	return func(params *reconfigureParams) {
-		params.ClusterComponent = &appsv1alpha1.ClusterComponentSpec{
+		params.ClusterComponent = &appsv1.ClusterComponentSpec{
 			Name:     "test",
 			Replicas: func() int32 { rep := int32(replicas); return rep }(),
 		}
@@ -162,10 +117,10 @@ func withConfigSpec(configSpecName string, data map[string]string) ParamsOps {
 	}
 }
 
-func withConfigConstraintSpec(formatter *appsv1alpha1.FormatterConfig) ParamsOps {
+func withConfigConstraintSpec(formatter *appsv1beta1.FileFormatConfig) ParamsOps {
 	return func(params *reconfigureParams) {
-		params.ConfigConstraint = &appsv1alpha1.ConfigConstraintSpec{
-			FormatterConfig: formatter,
+		params.ConfigConstraint = &appsv1beta1.ConfigConstraintSpec{
+			FileFormatConfig: formatter,
 		}
 	}
 }
@@ -191,36 +146,8 @@ func withConfigPatch(patch map[string]string) ParamsOps {
 			Key:           "for_test",
 			UpdatedParams: transKeyPair(patch),
 		}})
-		configPatch, _, _ := core.CreateConfigPatch(mockEmptyData(newConfigData), newConfigData, cc.FormatterConfig.Format, nil, false)
+		configPatch, _, _ := core.CreateConfigPatch(mockEmptyData(newConfigData), newConfigData, cc.FileFormatConfig.Format, nil, false)
 		params.ConfigPatch = configPatch
-	}
-}
-
-func withCDComponent(compType appsv1alpha1.WorkloadType, tpls []appsv1alpha1.ComponentConfigSpec) ParamsOps {
-	return func(params *reconfigureParams) {
-		params.Component = &appsv1alpha1.ClusterComponentDefinition{
-			ConfigSpecs:  tpls,
-			WorkloadType: compType,
-			Name:         string(compType),
-		}
-		if compType == appsv1alpha1.Consensus || compType == appsv1alpha1.Replication {
-			params.Component.RSMSpec = &appsv1alpha1.RSMSpec{
-				Roles: []workloads.ReplicaRole{
-					{
-						Name:       "leader",
-						IsLeader:   true,
-						AccessMode: workloads.ReadWriteMode,
-						CanVote:    true,
-					},
-					{
-						Name:       "follower",
-						IsLeader:   false,
-						AccessMode: workloads.ReadonlyMode,
-						CanVote:    true,
-					},
-				},
-			}
-		}
 	}
 }
 
@@ -233,7 +160,24 @@ func newMockReconfigureParams(testName string, cli client.Client, paramOps ...Pa
 			Log:      log.FromContext(ctx).WithValues("policy_test", testName),
 			Recorder: record.NewFakeRecorder(100),
 		},
-		Cluster: &appsv1alpha1.Cluster{
+		SynthesizedComponent: &component.SynthesizedComponent{
+			MinReadySeconds: 5,
+			Roles: []appsv1.ReplicaRole{
+				{
+					Name:        "leader",
+					Serviceable: true,
+					Writable:    true,
+					Votable:     true,
+				},
+				{
+					Name:        "follower",
+					Serviceable: true,
+					Writable:    false,
+					Votable:     true,
+				},
+			},
+		},
+		Cluster: &appsv1.Cluster{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "test",
 			}},
@@ -244,27 +188,11 @@ func newMockReconfigureParams(testName string, cli client.Client, paramOps ...Pa
 	return params
 }
 
-func newMockPodsWithStatefulSet(sts *appsv1.StatefulSet, replicas int, options ...PodOptions) []corev1.Pod {
+func newMockPodsWithInstanceSet(its *workloads.InstanceSet, replicas int, options ...PodOptions) []corev1.Pod {
 	pods := make([]corev1.Pod, replicas)
 	for i := 0; i < replicas; i++ {
-		pods[i] = newMockPod(sts.Name+"-"+fmt.Sprint(i), &sts.Spec.Template.Spec)
-		pods[i].OwnerReferences = []metav1.OwnerReference{newControllerRef(sts, stsSchemaKind)}
-		pods[i].Status.PodIP = "1.1.1.1"
-	}
-	for _, customFn := range options {
-		for i := range pods {
-			pod := &pods[i]
-			customFn(pod, i)
-		}
-	}
-	return pods
-}
-
-func newMockPodsWithDeployment(deploy *appsv1.Deployment, replicas int, options ...PodOptions) []corev1.Pod {
-	pods := make([]corev1.Pod, replicas)
-	for i := 0; i < replicas; i++ {
-		pods[i] = newMockPod(deploy.Name+"-"+fmt.Sprint(i), &deploy.Spec.Template.Spec)
-		pods[i].OwnerReferences = []metav1.OwnerReference{newControllerRef(deploy, stsSchemaKind)}
+		pods[i] = newMockPod(its.Name+"-"+fmt.Sprint(i), &its.Spec.Template.Spec)
+		pods[i].OwnerReferences = []metav1.OwnerReference{newControllerRef(its, itsSchemaKind)}
 		pods[i].Status.PodIP = "1.1.1.1"
 	}
 	for _, customFn := range options {
@@ -291,26 +219,6 @@ func withReadyPod(rMin, rMax int) PodOptions {
 			Status: corev1.ConditionTrue,
 		})
 
-		pod.Status.Phase = corev1.PodRunning
-	}
-}
-
-func withAvailablePod(rMin, rMax int) PodOptions {
-	return func(pod *corev1.Pod, index int) {
-		if index < rMin || index >= rMax {
-			return
-		}
-
-		if pod.Status.Conditions == nil {
-			pod.Status.Conditions = make([]corev1.PodCondition, 0)
-		}
-
-		h, _ := time.ParseDuration("-1h")
-		pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
-			Type:               corev1.PodReady,
-			Status:             corev1.ConditionTrue,
-			LastTransitionTime: metav1.NewTime(time.Now().Add(h)),
-		})
 		pod.Status.Phase = corev1.PodRunning
 	}
 }

@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -59,16 +59,11 @@ var _ = Describe("Reconfigure simplePolicy", func() {
 			Expect(simplePolicy.GetPolicyName()).Should(BeEquivalentTo("simple"))
 
 			mockParam := newMockReconfigureParams("simplePolicy", k8sMockClient.Client(),
-				withMockStatefulSet(2, nil),
+				withMockInstanceSet(2, nil),
 				withConfigSpec("for_test", map[string]string{
 					"key": "value",
 				}),
-				withClusterComponent(2),
-				withCDComponent(appsv1alpha1.Consensus, []appsv1alpha1.ComponentConfigSpec{{
-					ComponentTemplateSpec: appsv1alpha1.ComponentTemplateSpec{
-						Name:       "for_test",
-						VolumeName: "test_volume",
-					}}}))
+				withClusterComponent(2))
 
 			// mock client update caller
 			updateErr := core.MakeError("update failed!")
@@ -77,14 +72,14 @@ var _ = Describe("Reconfigure simplePolicy", func() {
 				testutil.WithSucceed(testutil.WithAnyTimes()))
 			k8sMockClient.MockListMethod(testutil.WithListReturned(
 				testutil.WithConstructListSequenceResult([][]runtime.Object{
-					fromPodObjectList(newMockPodsWithStatefulSet(&mockParam.ComponentUnits[0], 2)),
-					fromPodObjectList(newMockPodsWithStatefulSet(&mockParam.ComponentUnits[0], 2, withReadyPod(0, 2), func(pod *corev1.Pod, index int) {
+					fromPodObjectList(newMockPodsWithInstanceSet(&mockParam.InstanceSetUnits[0], 2)),
+					fromPodObjectList(newMockPodsWithInstanceSet(&mockParam.InstanceSetUnits[0], 2, withReadyPod(0, 2), func(pod *corev1.Pod, index int) {
 						// mock pod-1 restart
 						if index == 1 {
 							updatePodCfgVersion(pod, mockParam.getConfigKey(), mockParam.getTargetVersionHash())
 						}
 					})),
-					fromPodObjectList(newMockPodsWithStatefulSet(&mockParam.ComponentUnits[0], 2, withReadyPod(0, 2), func(pod *corev1.Pod, index int) {
+					fromPodObjectList(newMockPodsWithInstanceSet(&mockParam.InstanceSetUnits[0], 2, withReadyPod(0, 2), func(pod *corev1.Pod, index int) {
 						// mock all pod restart
 						updatePodCfgVersion(pod, mockParam.getConfigKey(), mockParam.getTargetVersionHash())
 					})),
@@ -122,23 +117,17 @@ var _ = Describe("Reconfigure simplePolicy", func() {
 	Context("simple reconfigure policy test with Replication", func() {
 		It("Should success", func() {
 			mockParam := newMockReconfigureParams("simplePolicy", k8sMockClient.Client(),
-				withMockStatefulSet(2, nil),
+				withMockInstanceSet(2, nil),
 				withConfigSpec("for_test", map[string]string{
 					"key": "value",
 				}),
-				withClusterComponent(2),
-				withCDComponent(appsv1alpha1.Replication, []appsv1alpha1.ComponentConfigSpec{{
-					ComponentTemplateSpec: appsv1alpha1.ComponentTemplateSpec{
-						Name:       "for_test",
-						VolumeName: "test_volume",
-					}}}),
-			)
+				withClusterComponent(2))
 
 			k8sMockClient.MockPatchMethod(testutil.WithSucceed(testutil.WithAnyTimes()))
 			k8sMockClient.MockListMethod(testutil.WithListReturned(
 				testutil.WithConstructListSequenceResult([][]runtime.Object{
-					fromPodObjectList(newMockPodsWithStatefulSet(&mockParam.ComponentUnits[0], 2)),
-					fromPodObjectList(newMockPodsWithStatefulSet(&mockParam.ComponentUnits[0], 2,
+					fromPodObjectList(newMockPodsWithInstanceSet(&mockParam.InstanceSetUnits[0], 2)),
+					fromPodObjectList(newMockPodsWithInstanceSet(&mockParam.InstanceSetUnits[0], 2,
 						withReadyPod(0, 2), func(pod *corev1.Pod, _ int) {
 							updatePodCfgVersion(pod, mockParam.getConfigKey(), mockParam.getTargetVersionHash())
 						})),
@@ -157,20 +146,15 @@ var _ = Describe("Reconfigure simplePolicy", func() {
 	})
 
 	// TODO(component)
-	PContext("simple reconfigure policy test for not supported component", func() {
+	Context("simple reconfigure policy test for not supported component", func() {
 		It("Should failed", func() {
 			// not support type
 			mockParam := newMockReconfigureParams("simplePolicy", k8sMockClient.Client(),
-				withMockDeployments(2, nil),
+				withMockInstanceSet(2, nil),
 				withConfigSpec("for_test", map[string]string{
 					"key": "value",
 				}),
-				withClusterComponent(2),
-				withCDComponent(appsv1alpha1.Stateless, []appsv1alpha1.ComponentConfigSpec{{
-					ComponentTemplateSpec: appsv1alpha1.ComponentTemplateSpec{
-						Name:       "for_test",
-						VolumeName: "test_volume",
-					}}}))
+				withClusterComponent(2))
 
 			updateErr := core.MakeError("update failed!")
 			k8sMockClient.MockPatchMethod(
@@ -178,14 +162,14 @@ var _ = Describe("Reconfigure simplePolicy", func() {
 				testutil.WithSucceed(testutil.WithAnyTimes()))
 			k8sMockClient.MockListMethod(testutil.WithListReturned(
 				testutil.WithConstructListSequenceResult([][]runtime.Object{
-					fromPodObjectList(newMockPodsWithDeployment(&mockParam.DeploymentUnits[0], 2)),
-					fromPodObjectList(newMockPodsWithDeployment(&mockParam.DeploymentUnits[0], 2, withReadyPod(0, 2), func(pod *corev1.Pod, index int) {
+					fromPodObjectList(newMockPodsWithInstanceSet(&mockParam.InstanceSetUnits[0], 2)),
+					fromPodObjectList(newMockPodsWithInstanceSet(&mockParam.InstanceSetUnits[0], 2, withReadyPod(0, 2), func(pod *corev1.Pod, index int) {
 						// mock pod-1 restart
 						if index == 1 {
 							updatePodCfgVersion(pod, mockParam.getConfigKey(), mockParam.getTargetVersionHash())
 						}
 					})),
-					fromPodObjectList(newMockPodsWithDeployment(&mockParam.DeploymentUnits[0], 2, withReadyPod(0, 2), func(pod *corev1.Pod, index int) {
+					fromPodObjectList(newMockPodsWithInstanceSet(&mockParam.InstanceSetUnits[0], 2, withReadyPod(0, 2), func(pod *corev1.Pod, index int) {
 						// mock all pod restart
 						updatePodCfgVersion(pod, mockParam.getConfigKey(), mockParam.getTargetVersionHash())
 					})),
@@ -225,7 +209,7 @@ var _ = Describe("Reconfigure simplePolicy", func() {
 	//	It("Should failed", func() {
 	//		// mock not cc
 	//		mockParam := newMockReconfigureParams("simplePolicy", nil,
-	//			withMockStatefulSet(2, nil),
+	//			withMockInstanceSet(2, nil),
 	//			withConfigSpec("not_tpl_name", map[string]string{
 	//				"key": "value",
 	//			}),

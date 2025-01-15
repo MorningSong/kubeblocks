@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -30,7 +30,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
+	appsv1 "github.com/apecloud/kubeblocks/apis/apps/v1"
+	appsv1beta1 "github.com/apecloud/kubeblocks/apis/apps/v1beta1"
 	cfgcore "github.com/apecloud/kubeblocks/pkg/configuration/core"
 	"github.com/apecloud/kubeblocks/pkg/constant"
 	intctrlutil "github.com/apecloud/kubeblocks/pkg/controllerutil"
@@ -64,18 +65,18 @@ func (r *ConfigConstraintReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		Recorder: r.Recorder,
 	}
 
-	configConstraint := &appsv1alpha1.ConfigConstraint{}
+	configConstraint := &appsv1beta1.ConfigConstraint{}
 	if err := r.Client.Get(reqCtx.Ctx, reqCtx.Req.NamespacedName, configConstraint); err != nil {
 		return intctrlutil.CheckedRequeueWithError(err, reqCtx.Log, "")
 	}
 
-	res, err := intctrlutil.HandleCRDeletion(reqCtx, r, configConstraint, constant.ConfigurationTemplateFinalizerName, func() (*ctrl.Result, error) {
+	res, err := intctrlutil.HandleCRDeletion(reqCtx, r, configConstraint, constant.ConfigFinalizerName, func() (*ctrl.Result, error) {
 		recordEvent := func() {
 			r.Recorder.Event(configConstraint, corev1.EventTypeWarning, "ExistsReferencedResources",
-				"cannot be deleted because of existing referencing of ClusterDefinition or ClusterVersion.")
+				"cannot be deleted because of existing referencing of ClusterDefinition.")
 		}
-		if configConstraint.Status.Phase != appsv1alpha1.CCDeletingPhase {
-			err := updateConfigConstraintStatus(r.Client, reqCtx, configConstraint, appsv1alpha1.CCDeletingPhase)
+		if configConstraint.Status.Phase != appsv1beta1.CCDeletingPhase {
+			err := updateConfigConstraintStatus(r.Client, reqCtx, configConstraint, appsv1beta1.CCDeletingPhase)
 			// if fail to update ConfigConstraint status, return error,
 			// so that it can be retried
 			if err != nil {
@@ -84,8 +85,7 @@ func (r *ConfigConstraintReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 		if res, err := intctrlutil.ValidateReferenceCR(reqCtx, r.Client, configConstraint,
 			cfgcore.GenerateConstraintsUniqLabelKeyWithConfig(configConstraint.GetName()),
-			recordEvent, &appsv1alpha1.ClusterDefinitionList{},
-			&appsv1alpha1.ClusterVersionList{}); res != nil || err != nil {
+			recordEvent, &appsv1.ClusterDefinitionList{}, &appsv1.ComponentDefinitionList{}); res != nil || err != nil {
 			return res, err
 		}
 		return nil, nil
@@ -94,7 +94,7 @@ func (r *ConfigConstraintReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return *res, err
 	}
 
-	if configConstraint.Status.ObservedGeneration == configConstraint.Generation && configConstraint.Status.IsConfigConstraintTerminalPhases() {
+	if configConstraint.Status.ObservedGeneration == configConstraint.Generation && configConstraint.Status.ConfigConstraintTerminalPhases() {
 		return intctrlutil.Reconciled()
 	}
 
@@ -107,7 +107,7 @@ func (r *ConfigConstraintReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return intctrlutil.CheckedRequeueWithError(err, reqCtx.Log, "failed to generate openAPISchema")
 	}
 
-	err = updateConfigConstraintStatus(r.Client, reqCtx, configConstraint, appsv1alpha1.CCAvailablePhase)
+	err = updateConfigConstraintStatus(r.Client, reqCtx, configConstraint, appsv1beta1.CCAvailablePhase)
 	if err != nil {
 		return intctrlutil.CheckedRequeueWithError(err, reqCtx.Log, "")
 	}
@@ -117,9 +117,9 @@ func (r *ConfigConstraintReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *ConfigConstraintReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&appsv1alpha1.ConfigConstraint{}).
+	return intctrlutil.NewControllerManagedBy(mgr).
+		For(&appsv1beta1.ConfigConstraint{}).
 		// for other resource
-		Owns(&corev1.ConfigMap{}).
+		Owns(&corev1.ConfigMap{}). // TODO(leon)
 		Complete(r)
 }

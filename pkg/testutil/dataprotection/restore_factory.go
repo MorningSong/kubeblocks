@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -39,6 +39,11 @@ func NewRestoreFactory(namespace, name string) *MockRestoreFactory {
 		&dpv1alpha1.Restore{
 			Spec: dpv1alpha1.RestoreSpec{},
 		}, f)
+	return f
+}
+
+func (f *MockRestoreFactory) SetNamespace(namespace string) *MockRestoreFactory {
+	f.Get().Namespace = namespace
 	return f
 }
 
@@ -97,7 +102,7 @@ func (f *MockRestoreFactory) buildRestoreVolumeClaim(name, volumeSource, mountPa
 		},
 		VolumeClaimSpec: corev1.PersistentVolumeClaimSpec{
 			StorageClassName: &storageClass,
-			Resources: corev1.ResourceRequirements{
+			Resources: corev1.VolumeResourceRequirements{
 				Requests: corev1.ResourceList{
 					corev1.ResourceStorage: resource.MustParse("20Gi"),
 				},
@@ -105,6 +110,11 @@ func (f *MockRestoreFactory) buildRestoreVolumeClaim(name, volumeSource, mountPa
 			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 		},
 	}
+}
+
+func (f *MockRestoreFactory) SetParameters(parameters []dpv1alpha1.ParameterPair) *MockRestoreFactory {
+	f.Get().Spec.Parameters = parameters
+	return f
 }
 
 func (f *MockRestoreFactory) SetVolumeClaimRestorePolicy(policy dpv1alpha1.VolumeClaimRestorePolicy) *MockRestoreFactory {
@@ -124,6 +134,17 @@ func (f *MockRestoreFactory) SetDataSourceRef(volumeSource, mountPath string) *M
 	f.Get().Spec.PrepareDataConfig.DataSourceRef = &dpv1alpha1.VolumeConfig{
 		VolumeSource: volumeSource,
 		MountPath:    mountPath,
+	}
+	return f
+}
+
+func (f *MockRestoreFactory) SetPrepareDataRequiredPolicy(restorePolicy dpv1alpha1.DataRestorePolicy, sourceTargetPodName string) *MockRestoreFactory {
+	f.initPrepareDataConfig()
+	f.Get().Spec.PrepareDataConfig.RequiredPolicyForAllPodSelection = &dpv1alpha1.RequiredPolicyForAllPodSelection{
+		DataRestorePolicy: restorePolicy,
+		SourceOfOneToMany: &dpv1alpha1.SourceOfOneToMany{
+			TargetPodName: sourceTargetPodName,
+		},
 	}
 	return f
 }
@@ -161,8 +182,10 @@ func (f *MockRestoreFactory) SetJobActionConfig(matchLabels map[string]string) *
 	f.initReadyConfig()
 	f.Get().Spec.ReadyConfig.JobAction = &dpv1alpha1.JobAction{
 		Target: dpv1alpha1.JobActionTarget{
-			PodSelector: metav1.LabelSelector{
-				MatchLabels: matchLabels,
+			PodSelector: dpv1alpha1.PodSelector{
+				LabelSelector: &metav1.LabelSelector{
+					MatchLabels: matchLabels,
+				},
 			},
 			VolumeMounts: []corev1.VolumeMount{
 				{

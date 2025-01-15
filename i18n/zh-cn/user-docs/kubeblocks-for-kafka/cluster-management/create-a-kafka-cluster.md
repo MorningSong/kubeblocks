@@ -15,17 +15,42 @@ import TabItem from '@theme/TabItem';
 
 ## 开始之前
 
-* [安装 kbcli](./../../installation/install-with-kbcli/install-kbcli.md)。
-* 安装 KubeBlocks：你可以使用 [kbcli](./../../installation/install-with-kbcli/install-kubeblocks-with-kbcli.md) 或 [Helm](../../installation/install-with-helm/install-kubeblocks-with-helm.md) 进行安装。
-* 确保 `kbcli addon list` 已启用。
+* 如果您想通过 `kbcli` 创建和管理集群，请先[安装 kbcli](./../../installation/install-kbcli.md)。
+* [安装 KubeBlocks](./../../installation/install-kubeblocks.md)。
+* 确保 Kafka 引擎 已启用。如果引擎未启用，可参考相关文档，[启用该引擎](./../../installation/install-addons.md)。
+
+  <Tabs>
+
+  <TabItem value="kubectl" label="kubectl" default>
+
+  ```bash
+  kubectl get addons.extensions.kubeblocks.io kafka
+  >
+  NAME    TYPE   VERSION   PROVIDER   STATUS    AGE
+  kafka   Helm                        Enabled   13m
+  ```
+
+  </TabItem>
+
+  <TabItem value="kbcli" label="kbcli">
 
   ```bash
   kbcli addon list
   >
-  NAME                           TYPE   STATUS     EXTRAS         AUTO-INSTALL   INSTALLABLE-SELECTOR
+  NAME                           TYPE   STATUS     EXTRAS         AUTO-INSTALL  
   ...
-  kafka                        Helm   Enabled                   true
+  kafka                          Helm   Enabled                   true
   ...
+  ```
+
+  </TabItem>
+
+  </Tabs>
+
+* 为保持隔离，本教程中创建一个名为 `demo` 的独立命名空间。
+
+  ```bash
+  kubectl create namespace demo
   ```
 
 :::note
@@ -35,132 +60,220 @@ import TabItem from '@theme/TabItem';
 - 建议将控制器数量设置在 3 到 5 个之间，实现复杂性和可用性的平衡。
 
 :::
+
 ## 创建 Kafka 集群
 
 <Tabs>
-<TabItem value="kbcli" label="kbcli" default>
-
-使用 `kbcli cluster create` 命令创建集群。你还可以使用 `--set` 参数自定义集群资源。
-
-```bash
-kbcli cluster create kafka
-```
-
-下表详细描述了各类自定义参数。请务必设置 `--termination-policy`。此外，强烈建议你打开监视器并启用所有日志。
-
-📎 Table 1. kbcli cluster create 选项详情
-
-|    选项                                                                 | 解释                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-|---------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| --mode='combined'                                                         | 表示 Kafka kraft 集群的模式。'combined' 表示使用组合的代理和控制器节点，'separated' 表示独立运行代理和控制器。有效值为 [combined, separated]。                                                                                                                                                                                                                                                                   |
-| --replicas=1                                                              | 表示组合模式下的 Kafka 代理的副本数。在组合模式下，此值还表示 kraft 控制器的数量。有效值为 [1,3,5]。                                                                                                                                                                                                                                                           |
-| --broker-replicas=1                                                       | 表示分离模式下的 Kafka 代理的副本数。                                                                                                                                                                                                                                                                                                                                                                                           |
-| --controller-replicas=1                                                   | 表示分离模式下的 Kafka 控制器的副本数。在分离模式下，此数字表示 kraft 控制器的数量。有效值为 [1,3,5]。                                                                                                                                                                                                                                                                                  |
-| --termination-policy='Delete'                                             | 表示集群的终止策略。有效值为 [DoNotTerminate, Halt, Delete, WipeOut]。 <br /> DoNotTerminate：DoNotTerminate 禁止删除操作。 <br /> Halt：Halt 删除工作负载资源（如 statefulset、deployment 等），但保留 PVC。 <br /> Delete：Delete 在 Halt 的基础上删除了 PVC。 <br /> WipeOut：WipeOut 在 Delete 的基础上删除了备份存储位置中的所有卷快照和快照数据。 |
-| --storage-enable=false                                                    | 表示是否启用 Kafka 的存储功能。                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| --host-network-accessible=false                                           | 指定集群是否可以从 VPC 内部访问。                                                                                                                                                                                                                                                                                                                                                                                  |
-| --publicly-accessible=false                                               | 指定集群是否可以从公共互联网访问。                                                                                                                                                                                                                                                                                                                                                                             |
-| --broker-heap='-XshowSettings:vm -XX:MaxRAMPercentage=100 -Ddepth=64'     | 表示 Kafka 代理的 JVM 堆设置。                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| --controller-heap='-XshowSettings:vm -XX:MaxRAMPercentage=100 -Ddepth=64' | 表示分离模式下 Kafka 控制器的 JVM 堆设置。仅在 mode='separated' 时生效。                                                                                                                                                                                                                                                                                                                                     |
-| --cpu=1                                                                   | 表示 CPU 内核数。                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| --memory=1                                                                | 表示内存，单位为 Gi。                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| --storage=20                                                              | 表示数据存储大小，单位为 Gi。                                                                                                                                                                                                                                                                                                                                                                                                               |
-| --storage-class=''                                                        | 表示 Kafka 数据存储的 StorageClass。                                                                                                                                                                                                                                                                                                                                                                                                          |
-| --meta-storage=5                                                          | 表示元数据存储大小，单位为 Gi。                                                                                                                                                                                                                                                                                                                                                                                                           |
-| --meta-storage-class=''                                                   | 表示 Kafka 元数据存储的 StorageClass。                                                                                                                                                                                                                                                                                                                                                                                                      |
-| --monitor-enable=false                                                    | 表示是否启用 Kafka 的监视器。                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| --monitor-replicas=1                                                      | 表示 Kafka 监视器的副本数。                                                                                                                                                                                                                                                                                                                                                                                                            |
-| --sasl-enable=false                                                       | 表示是否启用 SASL/PLAIN 进行 Kafka 身份验证。 <br /> -server: admin/kubeblocks <br /> -client: client/kubeblocks  <br /> 内置的 jaas 文件存储在 /tools/client-ssl.properties 中。                                                                                                                                                                                                                                                              |
-</TabItem>
 
 <TabItem value="kubectl" label="kubectl" default>
 
-* 创建组合模式的 Kafka 集群。
+1. 创建 Kafka 集群。
 
-    ```bash
-    # 创建组合模式的 Kafka 集群  
-    kubectl apply -f - <<EOF
-    apiVersion: apps.kubeblocks.io/v1alpha1
-    kind: Cluster
-    metadata:
-      name: kafka-combined
-      namespace: default
-    spec:
-      affinity:
-        podAntiAffinity: Preferred
-        tenancy: SharedNode
-        topologyKeys:
-        - kubernetes.io/hostname
-      clusterDefinitionRef: kafka
-      clusterVersionRef: kafka-3.3.2
-      componentSpecs:
-      - componentDefRef: kafka-server
-        monitor: false
-        name: broker
-        noCreatePDB: false
-        replicas: 1
-        resources:
-          limits:
-            cpu: "0.5"
-            memory: 0.5Gi
-          requests:
-            cpu: "0.5"
-            memory: 0.5Gi
-        serviceAccountName: kb-kafka-sa
-      terminationPolicy: Delete
-    EOF
-    ```
+   KubeBlocks 通过 `Cluster` 定义集群。以下为创建不同模式 Kafka 集群的示例。
 
-* 创建分离模式的 Kafka 集群。
+   如果您只有一个节点可用于部署多副本集群，可设置 `spec.schedulingPolicy` 或 `spec.componentSpecs.schedulingPolicy`，具体可参考 [API 文档](https://kubeblocks.io/docs/preview/developer_docs/api-reference/cluster#apps.kubeblocks.io/v1.SchedulingPolicy)。但生产环境中，不建议将所有副本部署在同一个节点上，因为这可能会降低集群的可用性。
 
-    ```bash
-    # 创建分离模式的 Kafka 集群 
-    kubectl apply -f - <<EOF
-    apiVersion: apps.kubeblocks.io/v1alpha1
-    kind: Cluster
-    metadata:
-      name: kafka-separated
-      namespace: default
-    spec:
-      affinity:
-        podAntiAffinity: Preferred
-        tenancy: SharedNode
-        topologyKeys:
-        - kubernetes.io/hostname
-      clusterDefinitionRef: kafka
-      clusterVersionRef: kafka-3.3.2
-      componentSpecs:
-      - componentDefRef: controller
-        monitor: false
-        name: controller
-        noCreatePDB: false
-        replicas: 1
-        resources:
-          limits:
-            cpu: "0.5"
-            memory: 0.5Gi
-          requests:
-            cpu: "0.5"
-            memory: 0.5Gi
-        serviceAccountName: kb-kafka-sa
-        tls: false
-      - componentDefRef: kafka-broker
-        monitor: false
-        name: broker
-        noCreatePDB: false
-        replicas: 1
-        resources:
-          limits:
-            cpu: "0.5"
-            memory: 0.5Gi
-          requests:
-            cpu: "0.5"
-            memory: 0.5Gi
-        serviceAccountName: kb-kafka-sa
-        tls: false
-      terminationPolicy: Delete
-    EOF
-    ```
+   * 创建组合模式的 Kafka 集群。
+
+     ```yaml
+     # 组合模式
+     kubectl apply -f - <<EOF
+     apiVersion: apps.kubeblocks.io/v1
+     kind: Cluster
+     metadata:
+       name: mycluster
+       namespace: demo
+     spec:
+       terminationPolicy: Delete
+       clusterDef: kafka
+       topology: combined_monitor
+       componentSpecs:
+         - name: kafka-combine
+           env:
+             - name: KB_KAFKA_BROKER_HEAP # use this ENV to set BROKER HEAP
+               value: "-XshowSettings:vm -XX:MaxRAMPercentage=100 -Ddepth=64"
+             - name: KB_KAFKA_CONTROLLER_HEAP # use this ENV to set CONTROLLER_HEAP
+               value: "-XshowSettings:vm -XX:MaxRAMPercentage=100 -Ddepth=64"
+             - name: KB_BROKER_DIRECT_POD_ACCESS # set to FALSE for node-port
+               value: "true"
+           replicas: 1
+           resources:
+             limits:
+               cpu: "1"
+               memory: "1Gi"
+             requests:
+               cpu: "0.5"
+               memory: "0.5Gi"
+           volumeClaimTemplates:
+             - name: data
+               spec:
+                 storageClassName: ""
+                 accessModes:
+                   - ReadWriteOnce
+                 resources:
+                   requests:
+                     storage: 20Gi
+             - name: metadata
+               spec:
+                 storageClassName: ""
+                 accessModes:
+                   - ReadWriteOnce
+                 resources:
+                   requests:
+                     storage: 1Gi
+         - name: kafka-exporter 
+           replicas: 1
+           resources:
+             limits:
+               cpu: "0.5"
+               memory: "1Gi"
+             requests:
+               cpu: "0.1"
+               memory: "0.2Gi"
+     EOF
+     ```
+
+   * 创建分离模式的 Kafka 集群。
+
+     ```yaml
+     # 分离模式
+     kubectl apply -f - <<EOF
+     apiVersion: apps.kubeblocks.io/v1
+     kind: Cluster
+     metadata:
+       name: mycluster
+       namespace: demo
+     spec:
+       terminationPolicy: Delete
+       clusterDef: kafka
+       topology: separated_monitor
+       componentSpecs:
+         - name: kafka-broker
+           replicas: 1
+           resources:
+             limits:
+               cpu: "0.5"
+               memory: "0.5Gi"
+             requests:
+               cpu: "0.5"
+               memory: "0.5Gi"
+           env:
+             - name: KB_KAFKA_BROKER_HEAP
+               value: "-XshowSettings:vm -XX:MaxRAMPercentage=100 -Ddepth=64"
+             - name: KB_KAFKA_CONTROLLER_HEAP
+               value: "-XshowSettings:vm -XX:MaxRAMPercentage=100 -Ddepth=64"
+             - name: KB_BROKER_DIRECT_POD_ACCESS
+               value: "true"
+           volumeClaimTemplates:
+             - name: data
+               spec:
+                 storageClassName: ""
+                 accessModes:
+                   - ReadWriteOnce
+                 resources:
+                   requests:
+                     storage: 20Gi
+             - name: metadata
+               spec:
+                 storageClassName: ""
+                 accessModes:
+                   - ReadWriteOnce
+                 resources:
+                   requests:
+                     storage: 1Gi
+         - name: kafka-controller
+           replicas: 1
+           resources:
+             limits:
+               cpu: "0.5"
+               memory: "0.5Gi"
+             requests:
+               cpu: "0.5"
+               memory: "0.5Gi"
+           volumeClaimTemplates:
+             - name: metadata
+               spec:
+                 storageClassName: ""
+                 accessModes:
+                   - ReadWriteOnce
+                 resources:
+                   requests:
+                     storage: 1Gi
+         - name: kafka-exporter
+           replicas: 1
+           resources:
+             limits:
+               cpu: "0.5"
+               memory: "1Gi"
+             requests:
+               cpu: "0.1"
+               memory: "0.2Gi"
+     EOF
+     ```
+
+   | 字段                                   | 定义  |
+   |---------------------------------------|--------------------------------------|
+   | `spec.terminationPolicy`              | 集群终止策略，有效值为 `DoNotTerminate`、`Delete` 和 `WipeOut`。具体定义可参考 [终止策略](./delete-mysql-cluster.md#终止策略)。 |
+   | `spec.clusterDef` | 指定了创建集群时要使用的 ClusterDefinition 的名称。**注意**：**请勿更新此字段**。创建 Kafka 集群时，该值必须为 `kafka`。 |
+   | `spec.topology` | 指定了在创建集群时要使用的 ClusterTopology 的名称。有效值为 [combined,combined_monitor,separated,separated_monitor]。 |
+   | `spec.componentSpecs`                 | 集群 component 列表，定义了集群 components。该字段支持自定义配置集群中每个 component。  |
+   | `spec.componentSpecs.replicas`        | 定义了 component 中 replicas 的数量。 |
+   | `spec.componentSpecs.resources`       | 定义了 component 的资源要求。  |
+   | `spec.componentSpecs.volumeClaimTemplates` | PersistentVolumeClaim 模板列表，定义 component 的存储需求。 |
+   | `spec.componentSpecs.volumeClaimTemplates.name` | 引用了在 `componentDefinition.spec.runtime.containers[*].volumeMounts` 中定义的 volumeMount 名称。  |
+   | `spec.componentSpecs.volumeClaimTemplates.spec.storageClassName` | 定义了 StorageClass 的名称。如果未指定，系统将默认使用带有 `storageclass.kubernetes.io/is-default-class=true` 注释的 StorageClass。  |
+   | `spec.componentSpecs.volumeClaimTemplates.spec.resources.storage` | 可按需配置存储容量。 |
+
+   您可参考 [API 文档](https://kubeblocks.io/docs/preview/developer_docs/api-reference/cluster)，查看更多 API 字段及说明。
+
+2. 查看集群是否创建成功。
+
+   ```bash
+   kubectl get cluster mycluster -n demo
+   >
+   NAME        CLUSTER-DEFINITION   VERSION       TERMINATION-POLICY   STATUS    AGE
+   mycluster   kafka                kafka-3.3.2   Delete               Running   2m2s
+   ```
+
+</TabItem>
+
+<TabItem value="kbcli" label="kbcli">
+
+1. 创建 Kafka 集群。
+
+   使用 `kbcli cluster create` 命令创建集群。
+
+   ```bash
+   kbcli cluster create kafka mycluster -n demo
+   ```
+
+   如果您需要自定义集群规格，kbcli 也提供了诸多参数，如支持设置引擎版本、终止策略、CPU、内存规格。您可通过在命令结尾添加 `--help` 或 `-h` 来查看具体说明。比如，
+
+   ```bash
+   kbcli cluster create kafka --help
+   kbcli cluster create kafka -h
+   ```
+
+   如果您只有一个节点用于部署多副本集群，可在创建集群时配置集群亲和性，配置 `--pod-anti-affinity`, `--tolerations` 和 `--topology-keys`。但需要注意的是，生产环境中，不建议将所有副本部署在同一个节点上，因为这可能会降低集群的可用性。例如，
+
+   ```bash
+   kbcli cluster create kafka mycluster \
+       --mode='combined' \
+       --replicas=3 \
+       --pod-anti-affinity='Preferred' \
+       --tolerations='node-role.kubeblocks.io/data-plane:NoSchedule' \
+       --topology-keys='null' \
+       --namespace demo
+   ```
+
+2. 验证集群是否创建成功。
+
+   ```bash
+   kbcli cluster list -n demo
+   >
+   NAME        NAMESPACE   CLUSTER-DEFINITION   VERSION       TERMINATION-POLICY   STATUS    CREATED-TIME
+   mycluster   demo        kafka                kafka-3.3.2   Delete               Running   Sep 27,2024 15:15 UTC+0800
+   ```
 
 </TabItem>
 

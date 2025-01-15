@@ -17,18 +17,29 @@ This tutorial shows how to create and connect to a PostgreSQL cluster.
 
 ### Before you start
 
-* [Install kbcli](./../../installation/install-with-kbcli/install-kbcli.md) if you want to create and connect a cluster by kbcli.
-* Install KubeBlocks: You can install KubeBlocks by [kbcli](./../../installation/install-with-kbcli/install-kubeblocks-with-kbcli.md) or by [Helm](./../../installation/install-with-helm/install-kubeblocks-with-helm.md).
-* Make sure the PostgreSQL add-on is enabled.
+* [Install kbcli](./../../installation/install-kbcli.md) if you want to manage the PostgreSQL cluster by `kbcli`.
+* [Install KubeBlocks](./../../installation/install-kubeblocks.md).
+* Make sure the PostgreSQL Addon is enabled. The PostgreSQL Addon is installed and enabled  by KubeBlocks by default. But if you disable it when installing KubeBlocks, [enable it](./../../installation/install-addons.md) first.
   
   <Tabs>
 
-  <TabItem value="kbcli" label="kbcli" default>
-  
+  <TabItem value="kubectl" label="kubectl" default>
+
+  ```bash
+  kubectl get addons.extensions.kubeblocks.io postgresql
+  >
+  NAME         TOPOLOGIES   SERVICEREFS   STATUS      AGE
+  postgresql                              Available   30m
+  ```
+
+  </TabItem>
+
+  <TabItem value="kbcli" label="kbcli">
+
   ```bash
   kbcli addon list
   >
-  NAME                       TYPE   STATUS     EXTRAS         AUTO-INSTALL   INSTALLABLE-SELECTOR
+  NAME                       TYPE   STATUS     EXTRAS         AUTO-INSTALL   
   ...
   postgresql                 Helm   Enabled                   true
   ...
@@ -36,47 +47,43 @@ This tutorial shows how to create and connect to a PostgreSQL cluster.
 
   </TabItem>
 
-  <TabItem value="kubectl" label="kubectl">
-
-  ```bash
-  kubectl get addons.extensions.kubeblocks.io postgresql
-  >
-  NAME         TYPE   STATUS    AGE
-  postgresql   Helm   Enabled   23m
-  ```
-
-  </TabItem>
   </Tabs>
 
 * View all the database types and versions available for creating a cluster.
 
   <Tabs>
 
-  <TabItem value="kbcli" label="kbcli" default>
+  <TabItem value="kubectl" label="kubectl" default>
+  
+  ```bash
+  kubectl get clusterdefinition postgresql
+  >
+  NAME         TOPOLOGIES   SERVICEREFS   STATUS      AGE
+  postgresql                              Available   30m
+  ```
+
+  View all available versions for creating a cluster.
 
   ```bash
-  kbcli clusterdefinition list
-
-  kbcli clusterversion list
+  kubectl get clusterversions -l clusterdefinition.kubeblocks.io/name=postgresql
+  >
+  NAME                 CLUSTER-DEFINITION   STATUS      AGE
+  postgresql-12.14.0   postgresql           Available   30m
+  postgresql-12.14.1   postgresql           Available   30m
+  postgresql-12.15.0   postgresql           Available   30m
+  postgresql-14.7.2    postgresql           Available   30m
+  postgresql-14.8.0    postgresql           Available   30m
+  postgresql-15.7.0    postgresql           Available   30m
+  postgresql-16.4.0    postgresql           Available   30m
   ```
 
   </TabItem>
 
-  <TabItem value="kubectl" label="kubectl">
-  
-  Make sure the `postgresql` cluster definition is installed with `kubectl get clusterdefinitions postgresql`.
+  <TabItem value="kbcli" label="kbcli">
 
   ```bash
-  kubectl get clusterdefinition postgresql
-  >
-  NAME         MAIN-COMPONENT-NAME   STATUS      AGE
-  postgresql   postgresql            Available   25m
-  ```
-
-  View all available versions for creating a cluster
-
-  ```bash
-  kubectl get clusterversions -l clusterdefinition.kubeblocks.io/name=postgresql
+  kbcli clusterdefinition list
+  kbcli clusterversion list
   ```
 
   </TabItem>
@@ -85,222 +92,138 @@ This tutorial shows how to create and connect to a PostgreSQL cluster.
 
 * To keep things isolated, create a separate namespace called `demo` throughout this tutorial.
 
-  ```bash
-  kubectl create namespace demo
-  ```
+   ```bash
+   kubectl create namespace demo
+   ```
 
 ### Create a cluster
 
-KubeBlocks supports creating two types of PostgreSQL clusters: Standalone and Replication Cluster. Standalone only supports one replica and can be used in scenarios with lower requirements for availability. For scenarios with high availability requirements, it is recommended to create a Replication Cluster, which creates a cluster with a Replication Cluster to support automatic failover. And to ensure high availability, Primary and Secondary are distributed on different nodes by default.
+KubeBlocks supports creating two types of PostgreSQL clusters: Standalone and Replication Cluster. Standalone only supports one replica and can be used in scenarios with lower requirements for availability. For scenarios with high availability requirements, it is recommended to create a Replication Cluster, which creates a cluster with a Replication Cluster to support automatic failover. To ensure high availability, Primary and Secondary are distributed on different nodes by default.
 
 <Tabs>
 
-<TabItem value="kbcli" label="kbcli" default>
+<TabItem value="kubectl" label="kubectl" default>
 
-Create a Standalone.
+1. Create a PostgreSQL cluster. If you only have one node for deploying a Replication Cluster, configure the cluster affinity by setting `spec.schedulingPolicy` or `spec.componentSpecs.schedulingPolicy`. For details, you can refer to the [API docs](https://kubeblocks.io/docs/preview/developer_docs/api-reference/cluster#apps.kubeblocks.io/v1.SchedulingPolicy). But for a production environment, it is not recommended to deploy all replicas on one node, which may decrease the cluster availability.
 
-```bash
-kbcli cluster create postgresql <clustername>
-```
+   KubeBlocks implements a `Cluster` CRD to define a cluster. Here is an example of creating a Replication.
 
-Create a Replication Cluster.
+   ```yaml
+   cat <<EOF | kubectl apply -f -
+   apiVersion: apps.kubeblocks.io/v1
+   kind: Cluster
+   metadata:
+     name: mycluster
+     namespace: demo
+   spec:
+     terminationPolicy: Delete
+     clusterDef: postgresql
+     topology: replication
+     componentSpecs:
+       - name: postgresql
+         serviceVersion: "14.7.2"
+         disableExporter: false
+         labels:
+           # Note: DO NOT REMOVE THIS LABEL
+           apps.kubeblocks.postgres.patroni/scope: mycluster-postgresql
+         replicas: 2
+         resources:
+           limits:
+             cpu: "0.5"
+             memory: "0.5Gi"
+           requests:
+             cpu: "0.5"
+             memory: "0.5Gi"
+         volumeClaimTemplates:
+           - name: data
+             spec:
+               storageClassName: ""
+               accessModes:
+                 - ReadWriteOnce
+               resources:
+                 requests:
+                   storage: 20Gi
+   EOF
+   ```
 
-```bash
-kbcli cluster create postgresql --mode replication <clustername>
-```
+   | Field                                 | Definition  |
+   |---------------------------------------|--------------------------------------|
+   | `spec.terminationPolicy`              | It is the policy of cluster termination. Valid values are `DoNotTerminate`, `Delete`, `WipeOut`. For the detailed definition, you can refer to [Termination Policy](./delete-a-postgresql-cluster.md#termination-policy). |
+   | `spec.clusterDef` | It specifies the name of the ClusterDefinition to use when creating a Cluster. Note: DO NOT UPDATE THIS FIELD. The value must be `postgresql` to create a PostgreSQL Cluster. |
+   | `spec.topology` | It specifies the name of the ClusterTopology to be used when creating the Cluster. The valid option is [replication]. |
+   | `spec.componentSpecs`                 | It is the list of ClusterComponentSpec objects that define the individual Components that make up a Cluster. This field allows customized configuration of each component within a cluster.   |
+   | `spec.componentSpecs.serviceVersion` | It specifies the version of the Service expected to be provisioned by this Component. Valid options are: [12.14.0,12.14.1,12.15.0,14.7.2,14.8.0,15.7.0,16.4.0]. |
+   | `spec.componentSpecs.disableExporter` | It determines whether metrics exporter information is annotated on the Component's headless Service. Valid options are [true, false]. |
+   | `spec.componentSpecs.labels` | It specifies Labels to override or add for underlying Pods, PVCs, Account & TLS Secrets, Services owned by Component. |
+   | `spec.componentSpecs.labels.apps.kubeblocks.postgres.patroni/scope` | PostgreSQL's `ComponentDefinition` specifies the environment variable `KUBERNETES_SCOPE_LABEL=apps.kubeblocks.postgres.patroni/scope`. This variable defines the label key Patroni uses to tag Kubernetes resources, helping Patroni identify which resources belong to the specified scope (or cluster). **Note**: **DO NOT REMOVE THIS LABEL.** You can update its value to match your cluster name. The value must follow the format `<cluster.metadata.name>-postgresql`. For example, if your cluster name is `mycluster`, the value would be `mycluster-postgresql`. Replace `mycluster` with your actual cluster name as needed.  |
+   | `spec.componentSpecs.replicas`        | It specifies the number of replicas of the component. |
+   | `spec.componentSpecs.resources`       | It specifies the resources required by the Component.  |
+   | `spec.componentSpecs.volumeClaimTemplates` | It specifies a list of PersistentVolumeClaim templates that define the storage requirements for the Component. |
+   | `spec.componentSpecs.volumeClaimTemplates.name` | It refers to the name of a volumeMount defined in `componentDefinition.spec.runtime.containers[*].volumeMounts`. |
+   | `spec.componentSpecs.volumeClaimTemplates.spec.storageClassName` | It is the name of the StorageClass required by the claim. If not specified, the StorageClass annotated with `storageclass.kubernetes.io/is-default-class=true` will be used by default. |
+   | `spec.componentSpecs.volumeClaimTemplates.spec.resources.storage` | You can set the storage size as needed. |
 
-If you only have one node for deploying a Replication, set the `availability-policy` as `none` when creating a Replication Cluster.
+   For more API fields and descriptions, refer to the [API Reference](https://kubeblocks.io/docs/preview/developer_docs/api-reference/cluster).
 
-```bash
-kbcli cluster create postgresql --mode replication --availability-policy none <clustername>
-```
+   KubeBlocks operator watches for the `Cluster` CRD and creates the cluster and all dependent resources. You can get all the resources created by the cluster with `kubectl get all,secret,rolebinding,serviceaccount -l app.kubernetes.io/instance=mycluster -n demo`.
 
-:::note
+   ```bash
+   kubectl get all,secret,rolebinding,serviceaccount -l app.kubernetes.io/instance=mycluster -n demo
+   ```
 
-* In the production environment, it is not recommended to deploy all replicas on one node, which may decrease cluster availability.
-* Run the command below to view the flags for creating a PostgreSQL cluster and the default values.
-  
-  ```bash
-  kbcli cluster create postgresql -h
-  ```
+   Run the following command to see the created PostgreSQL cluster object:
 
-:::
+   ```bash
+   kubectl get cluster mycluster -n demo -o yaml
+   ```
+
+2. Verify whether this cluster is created successfully.
+
+   ```bash
+   kubectl get cluster mycluster -n demo
+   >
+   NAME        CLUSTER-DEFINITION   VERSION             TERMINATION-POLICY   STATUS    AGE
+   mycluster   postgresql           postgresql-14.8.0   Delete               Running   9m21s
+   ```
 
 </TabItem>
 
-<TabItem value="kubectl" label="kubectl">
+<TabItem value="kbcli" label="kbcli">
 
-KubeBlocks implements a `Cluster` CRD to define a cluster. Here is an example of creating a Standalone.
+1. Create a PostgreSQL cluster.
 
-  ```bash
-  cat <<EOF | kubectl apply -f -
-  apiVersion: apps.kubeblocks.io/v1alpha1
-  kind: Cluster
-  metadata:
-    name: pg-cluster
-    namespace: demo
-    labels: 
-      helm.sh/chart: postgresql-cluster-0.6.0-alpha.36
-      app.kubernetes.io/version: "14.8.0"
-      app.kubernetes.io/instance: pg
-  spec:
-    clusterVersionRef: postgresql-14.8.0
-    terminationPolicy: Delete  
-    affinity:
-      podAntiAffinity: Preferred
-      topologyKeys:
-        - kubernetes.io/hostname
-      tenancy: SharedNode
-    clusterDefinitionRef: postgresql
-    componentSpecs:
-      - name: postgresql
-        componentDefRef: postgresql      
-        monitor: false      
-        replicas: 1
-        enabledLogs:
-          - running
-        serviceAccountName: kb-pg
-        switchPolicy:
-          type: Noop      
-        resources:
-          limits:
-            cpu: "0.5"
-            memory: "0.5Gi"
-          requests:
-            cpu: "0.5"
-            memory: "0.5Gi"      
-        volumeClaimTemplates:
-          - name: data # ref clusterDefinition components.containers.volumeMounts.name
-            spec:
-              accessModes:
-                - ReadWriteOnce
-              resources:
-                requests:
-                  storage: 20Gi      
-        services:
-  EOF
-  ```
+   Here is an example of creating a Standalone.
 
-* `spec.clusterDefinitionRef` is the name of the cluster definition CRD that defines the cluster components.
-* `spec.clusterVersionRef` is the name of the cluster version CRD that defines the cluster version.
-* `spec.componentSpecs` is the list of components that define the cluster components.
-* `spec.componentSpecs.componentDefRef` is the name of the component definition that is defined in the cluster definition, you can get the component definition names with `kubectl get clusterdefinition postgresql -o json | jq '.spec.componentDefs[].name'`.
-* `spec.componentSpecs.name` is the name of the component.
-* `spec.componentSpecs.replicas` is the number of replicas of the component.
-* `spec.componentSpecs.resources` is the resource requirements of the component.
-* `spec.componentSpecs.volumeClaimTemplates` is the list of volume claim templates that define the volume claim templates for the component.
-* `spec.terminationPolicy` is the policy of cluster termination. The default value is `Delete`. Valid values are `DoNotTerminate`, `Halt`, `Delete`, `WipeOut`. `DoNotTerminate` blocks delete operation. `Halt` deletes workload resources such as statefulset and deployment workloads but keep PVCs. `Delete` is based on Halt and deletes PVCs. `WipeOut` is based on Delete and wipe out all volume snapshots and snapshot data from the backup storage location.
+   ```bash
+   kbcli cluster create postgresql mycluster -n demo
+   ```
 
-KubeBlocks operator watches for the `Cluster` CRD and creates the cluster and all dependent resources. You can get all the resources created by the cluster with `kubectl get all,secret,rolebinding,serviceaccount -l app.kubernetes.io/instance=pg-cluster -n demo`.
+   `kbcli` provides various options for you to customize your cluster specifications, such as setting cluster version, termination policy, CPU, and memory. You can view these options by adding `--help` or `-h` flag.
 
-```bash
-kubectl get all,secret,rolebinding,serviceaccount -l app.kubernetes.io/instance=pg-cluster -n demo
-```
+   ```bash
+   kbcli cluster create postgresql --help
+   kbcli cluster create postgresql -h
+   ```
 
-Run the following command to see the created PostgreSQL cluster object:
+   If you only have one node for deploying a Replication Cluster, you can configure the cluster affinity by setting `--pod-anti-affinity`, `--tolerations`, and `--topology-keys` when creating a Replication Cluster. But you should note that for a production environment, it is not recommended to deploy all replicas on one node, which may decrease the cluster availability. For example,
 
-```bash
-kubectl get cluster pg-cluster -n demo -o yaml
-```
+   ```bash
+   kbcli cluster create postgresql mycluster \
+       --mode='replication' \
+       --pod-anti-affinity='Preferred' \
+       --tolerations='node-role.kubeblocks.io/data-plane:NoSchedule' \
+       --topology-keys='null' \
+       --namespace demo
+   ```
 
-<details>
+2. Verify whether this cluster is created successfully.
 
-<summary>Output</summary>
-
-```yaml
-apiVersion: apps.kubeblocks.io/v1alpha1
-kind: Cluster
-metadata:
-  annotations:
-    kubectl.kubernetes.io/last-applied-configuration: |
-      {"apiVersion":"apps.kubeblocks.io/v1alpha1","kind":"Cluster","metadata":{"annotations":{},"labels":{"app.kubernetes.io/instance":"pg","app.kubernetes.io/version":"14.8.0","helm.sh/chart":"postgresql-cluster-0.6.0-alpha.36"},"name":"pg-cluster","namespace":"demo"},"spec":{"affinity":{"podAntiAffinity":"Preferred","tenancy":"SharedNode","topologyKeys":["kubernetes.io/hostname"]},"clusterDefinitionRef":"postgresql","clusterVersionRef":"postgresql-14.8.0","componentSpecs":[{"componentDefRef":"postgresql","enabledLogs":["running"],"monitor":false,"name":"postgresql","replicas":1,"resources":{"limits":{"cpu":"0.5","memory":"0.5Gi"},"requests":{"cpu":"0.5","memory":"0.5Gi"}},"serviceAccountName":"kb-pg","services":null,"switchPolicy":{"type":"Noop"},"volumeClaimTemplates":[{"name":"data","spec":{"accessModes":["ReadWriteOnce"],"resources":{"requests":{"storage":"20Gi"}}}}]}],"terminationPolicy":"Delete"}}
-  creationTimestamp: "2023-07-19T07:53:07Z"
-  finalizers:
-  - cluster.kubeblocks.io/finalizer
-  generation: 1
-  labels:
-    app.kubernetes.io/instance: pg
-    app.kubernetes.io/version: 14.8.0
-    clusterdefinition.kubeblocks.io/name: postgresql
-    clusterversion.kubeblocks.io/name: postgresql-14.8.0
-    helm.sh/chart: postgresql-cluster-0.6.0-alpha.36
-  name: pg-cluster
-  namespace: demo
-  resourceVersion: "8618"
-  uid: c9f73d21-b79b-4956-aad0-a4e677cb8ba1
-spec:
-  affinity:
-    podAntiAffinity: Preferred
-    tenancy: SharedNode
-    topologyKeys:
-    - kubernetes.io/hostname
-  clusterDefinitionRef: postgresql
-  clusterVersionRef: postgresql-14.8.0
-  componentSpecs:
-  - componentDefRef: postgresql
-    enabledLogs:
-    - running
-    monitor: false
-    name: postgresql
-    noCreatePDB: false
-    replicas: 1
-    resources:
-      limits:
-        cpu: "0.5"
-        memory: 0.5Gi
-      requests:
-        cpu: "0.5"
-        memory: 0.5Gi
-    serviceAccountName: kb-pg
-    switchPolicy:
-      type: Noop
-    volumeClaimTemplates:
-    - name: data
-      spec:
-        accessModes:
-        - ReadWriteOnce
-        resources:
-          requests:
-            storage: 20Gi
-  terminationPolicy: Delete
-status:
-  clusterDefGeneration: 2
-  components:
-    postgresql:
-      phase: Running
-      podsReady: true
-      podsReadyTime: "2023-07-19T07:53:43Z"
-      replicationSetStatus:
-        primary:
-          pod: pg-cluster-postgresql-0
-  conditions:
-  - lastTransitionTime: "2023-07-19T07:53:07Z"
-    message: 'The operator has started the provisioning of Cluster: pg-cluster'
-    observedGeneration: 1
-    reason: PreCheckSucceed
-    status: "True"
-    type: ProvisioningStarted
-  - lastTransitionTime: "2023-07-19T07:53:07Z"
-    message: Successfully applied for resources
-    observedGeneration: 1
-    reason: ApplyResourcesSucceed
-    status: "True"
-    type: ApplyResources
-  - lastTransitionTime: "2023-07-19T07:53:43Z"
-    message: all pods of components are ready, waiting for the probe detection successful
-    reason: AllReplicasReady
-    status: "True"
-    type: ReplicasReady
-  - lastTransitionTime: "2023-07-19T07:53:43Z"
-    message: 'Cluster: pg-cluster is ready, current phase is Running'
-    reason: ClusterReady
-    status: "True"
-    type: Ready
-  observedGeneration: 1
-  phase: Running
-```
-
-</details>
+   ```bash
+   kbcli cluster list -n demo
+   >
+   NAME        NAMESPACE   CLUSTER-DEFINITION   VERSION             TERMINATION-POLICY   STATUS    CREATED-TIME
+   mycluster   demo        postgresql           postgresql-14.8.0   Delete               Running   Sep 28,2024 16:47 UTC+0800
+   ```
 
 </TabItem>
 
@@ -310,19 +233,11 @@ status:
 
 <Tabs>
 
-<TabItem value="kbcli" label="kbcli" default>
-
-```bash
-kbcli cluster connect <clustername>  --namespace <name>
-```
-
-</TabItem>
-
-<TabItem value="kubectl" label="kubectl">
+<TabItem value="kubectl" label="kubectl" default>
 
 You can use `kubectl exec` to exec into a Pod and connect to a database.
 
-KubeBlocks operator has created a new Secret called `pg-cluster-conn-credential` to store the connection credential of the `pg-cluster` cluster. This secret contains following keys:
+KubeBlocks operator has created a new Secret called `mycluster-conn-credential` to store the connection credential of the `mycluster` cluster. This secret contains following keys:
 
 * `username`: the root username of the PostgreSQL cluster.
 * `password`: the password of root user.
@@ -333,21 +248,21 @@ KubeBlocks operator has created a new Secret called `pg-cluster-conn-credential`
 1. Run the command below to get the `username` and `password` for the `kubectl exec` command.
 
    ```bash
-   kubectl get secrets -n demo pg-cluster-conn-credential -o jsonpath='{.data.\username}' | base64 -d
+   kubectl get secrets -n demo mycluster-conn-credential -o jsonpath='{.data.username}' | base64 -d
    >
    postgres
 
-   kubectl get secrets -n demo pg-cluster-conn-credential -o jsonpath='{.data.\password}' | base64 -d
+   kubectl get secrets -n demo mycluster-conn-credential -o jsonpath='{.data.password}' | base64 -d
    >
    h62rg2kl
    ```
 
-2. Exec into the Pod `pg-cluster-postgresql-0` and connect to the database using username and password.
+2. Exec into the Pod `mycluster-postgresql-0` and connect to the database using username and password.
 
    ```bash
-   kubectl exec -ti -n demo pg-cluster-postgresql-0 -- bash
+   kubectl exec -ti -n demo mycluster-postgresql-0 -- bash
 
-   root@pg-cluster-postgresql-0:/home/postgres# psql -U postgres -W
+   root@mycluster-postgresql-0:/home/postgres# psql -U postgres -W
    Password: h62rg2kl
    ```
 
@@ -360,15 +275,23 @@ You can also port forward the service to connect to the database from your local
 1. Run the following command to port forward the service.
 
    ```bash
-   kubectl port-forward -n demo svc/pg-cluster-postgresql 5432:5432 
+   kubectl port-forward -n demo svc/mycluster-postgresql 5432:5432 
    ```
 
 2. Open a new terminal and run the following command to connect to the database.
 
    ```bash
-   root@pg-cluster-postgresql-0:/home/postgres# psql -U postgres -W
+   root@mycluster-postgresql-0:/home/postgres# psql -U postgres -W
    Password: h62rg2kl
    ```
+
+</TabItem>
+
+<TabItem value="kbcli" label="kbcli">
+
+```bash
+kbcli cluster connect mycluster  --namespace demo
+```
 
 </TabItem>
 

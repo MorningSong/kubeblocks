@@ -2,16 +2,24 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "kubeblocks.fullname" . }}
+  {{- with .Values.deployAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   labels:
     {{- include "kubeblocks.labels" . | nindent 4 }}
     app.kubernetes.io/component: "apps"
 spec:
   {{- if not .Values.autoscaling.enabled }}
-  replicas: {{ .Values.replicaCount }}
+  replicas: {{ include "kubeblocks.replicaCount" . }}
   {{- end }}
   selector:
     matchLabels:
+      app.kubernetes.io/component: "apps"
       {{- include "kubeblocks.selectorLabels" . | nindent 6 }}
+      {{- with .Values.extraLabels }}
+        {{- toYaml . | nindent 6 }}
+      {{- end }}
   {{- if .Values.updateStrategy }}
   strategy:
     {{ toYaml .Values.updateStrategy | nindent 4 | trim }}
@@ -23,7 +31,11 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       labels:
+        app.kubernetes.io/component: "apps"
         {{- include "kubeblocks.selectorLabels" . | nindent 8 }}
+        {{- with .Values.extraLabels }}
+          {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
       priorityClassName: {{ template "kubeblocks.priorityClassName" . }}
       {{- with .Values.image.imagePullSecrets }}
@@ -36,13 +48,6 @@ spec:
       initContainers: # only download tools image to local
         - name: tools
           image: "{{ .Values.image.registry | default "docker.io" }}/{{ .Values.image.tools.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
-          resources:
-            {{- toYaml .Values.resources | nindent 12 }}
-          command:
-            - /bin/true
-        - name: datascript
-          image: "{{ .Values.image.registry | default "docker.io" }}/{{ .Values.image.datascript.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
@@ -62,15 +67,45 @@ spec:
             {{- with .Values.loggerSettings.encoder }}
             - "--zap-encoder={{ . }}"
             {{- end }}
+            - "--apps={{ ne .Values.controllers.apps.enabled false }}"
+            - "--workloads={{ ne .Values.controllers.workloads.enabled false }}"
+            - "--operations={{ ne .Values.controllers.operations.enabled false }}"
             - "--extensions={{- default "true" ( include "kubeblocks.addonControllerEnabled" . ) }}"
-            - "--apps=true"
-            - "--workloads=true"
+            - "--experimental={{- default "false" .Values.controllers.experimental.enabled }}"
+            - "--trace={{- default "false" .Values.controllers.trace.enabled }}"
+            {{- with .Values.managedNamespaces }}
+            - "--managed-namespaces={{ . }}"
+            {{- end }}
+            {{- if .Values.multiCluster.kubeConfig }}
+            - "--multi-cluster-kubeconfig={{ .Values.multiCluster.mountPath }}/kubeconfig"
+            {{- end }}
+            {{- if .Values.multiCluster.contexts }}
+            - "--multi-cluster-contexts={{ .Values.multiCluster.contexts }}"
+            {{- end }}
+            {{- if .Values.multiCluster.contextsDisabled }}
+            - "--multi-cluster-contexts-disabled={{ .Values.multiCluster.contextsDisabled }}"
+            {{- end }}
+            {{- if .Values.userAgent }}
+            - "--user-agent={{ .Values.userAgent }}"
+            {{- end }}
           env:
             - name: CM_NAMESPACE
               value: {{ .Release.Namespace }}
             {{- with .Values.affinity }}
             - name: CM_AFFINITY
               value: {{ toJson . | quote }}
+            {{- end }}
+            {{- if .Values.reconcileWorkers }}
+            - name: KUBEBLOCKS_RECONCILE_WORKERS
+              value: {{ .Values.reconcileWorkers | quote }}
+            {{- end }}
+            {{- if .Values.client.qps }}
+            - name: CLIENT_QPS
+              value: {{ .Values.client.qps | quote }}
+            {{- end }}
+            {{- if .Values.client.burst }}
+            - name: CLIENT_BURST
+              value: {{ .Values.client.burst | quote }}
             {{- end }}
             {{- with .Values.nodeSelector }}
             - name: CM_NODE_SELECTOR
@@ -82,10 +117,10 @@ spec:
             {{- end }}
             - name: KUBEBLOCKS_IMAGE_PULL_POLICY
               value: {{ .Values.image.pullPolicy }}
+            - name: KUBEBLOCKS_IMAGE_PULL_SECRETS
+              value: {{ .Values.image.imagePullSecrets | toJson | quote }}
             - name: KUBEBLOCKS_TOOLS_IMAGE
               value: "{{ .Values.image.registry | default "docker.io" }}/{{ .Values.image.tools.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
-            - name: KUBEBLOCKS_DATASCRIPT_CLIENTS_IMAGE
-              value: "{{ .Values.image.registry | default "docker.io" }}/{{ .Values.image.datascript.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
             - name: KUBEBLOCKS_SERVICEACCOUNT_NAME
               value: {{ include "kubeblocks.serviceAccountName" . }}
             {{- if .Capabilities.APIVersions.Has "snapshot.storage.k8s.io/v1" }}
@@ -95,7 +130,7 @@ spec:
             - name: VOLUMESNAPSHOT_API_BETA
               value: "true"
             {{- end }}
-            {{- if .Values.admissionWebhooks.enabled }}
+            {{- if .Values.webhooks.conversionEnabled }}
             - name: ENABLE_WEBHOOKS
               value: "true"
             {{- end }}
@@ -118,10 +153,44 @@ spec:
             - name: DP_ENCRYPTION_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "kubeblocks.fullname" . }}-secret
-                  key: dataProtectionEncryptionKey
+                  {{- include "dataprotection.encryptionKeySecretKeyRef" . | nindent 18 }}
+            {{- if .Values.dataProtection.enableBackupEncryption }}
+            - name: DP_BACKUP_ENCRYPTION_SECRET_KEY_REF
+              value: {{ include "dataprotection.encryptionKeySecretKeyRef" . | fromYaml | toJson | quote }}
+            - name: DP_BACKUP_ENCRYPTION_ALGORITHM
+              value: {{ include "dataprotection.backupEncryptionAlgorithm" . }}
+            {{- end }}
             - name: KUBE_PROVIDER
               value: {{ .Values.provider | quote }}
+            - name: HOST_PORT_INCLUDE_RANGES
+              value: '{{ join "," .Values.hostPorts.include }}'
+            - name: HOST_PORT_EXCLUDE_RANGES
+              value: '{{ join "," .Values.hostPorts.exclude }}'
+            - name: HOST_PORT_CM_NAME
+              value: {{ include "kubeblocks.fullname" . }}-host-ports
+            {{- if .Values.serviceMonitor.goRuntime.enabled }}
+            - name: ENABLED_RUNTIME_METRICS
+              value: "true"
+            {{- end }}
+            {{- if .Values.featureGates.ignoreConfigTemplateDefaultMode.enabled }}
+            - name: IGNORE_CONFIG_TEMPLATE_DEFAULT_MODE
+              value: "true"
+            {{- end }}
+            {{- if .Values.featureGates.ignorePodVerticalScaling.enabled }}
+            - name: IGNORE_POD_VERTICAL_SCALING
+              value: "true"
+            {{- end }}
+            - name: COMPONENT_REPLICAS_ANNOTATION
+              value: {{ .Values.featureGates.componentReplicasAnnotation.enabled | quote }}
+            - name: IN_PLACE_POD_VERTICAL_SCALING
+              value: {{ .Values.featureGates.inPlacePodVerticalScaling.enabled | quote }}
+            {{- if .Values.controllers.trace.enabled }}
+            - name: I18N_RESOURCES_NAME
+              value: {{ include "kubeblocks.i18nResourcesName" . }}
+            {{- end }}
+            {{- if .Values.extraEnvs }}
+            {{- toYaml .Values.extraEnvs | nindent 12 }}
+            {{- end }}
           {{- with .Values.securityContext }}
           securityContext:
             {{- toYaml . | nindent 12 }}
@@ -153,13 +222,18 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
-          - mountPath: /etc/kubeblocks
-            name: manager-config
-          {{- if .Values.admissionWebhooks.enabled }}
+            - mountPath: /etc/kubeblocks
+              name: manager-config
+            {{- if .Values.webhooks.conversionEnabled }}
             - mountPath: /tmp/k8s-webhook-server/serving-certs
               name: cert
               readOnly: true
-          {{- end }}
+            {{- end }}
+            {{- if .Values.multiCluster.kubeConfig }}
+            - mountPath: {{ .Values.multiCluster.mountPath }}
+              name: multi-cluster-kubeconfig
+              readOnly: true
+            {{- end }}
       {{- if .Values.hostNetwork }}
       hostNetwork: {{ .Values.hostNetwork }}
       {{- end }}
@@ -187,9 +261,15 @@ spec:
         - name: manager-config
           configMap:
             name: {{ include "kubeblocks.fullname" . }}-manager-config
-        {{- if .Values.admissionWebhooks.enabled }}
+        {{- if .Values.webhooks.conversionEnabled }}
         - name: cert
           secret:
             defaultMode: 420
             secretName: {{ include "kubeblocks.fullname" . }}.{{ .Release.Namespace }}.svc.tls-pair
+        {{- end }}
+        {{- if .Values.multiCluster.kubeConfig }}
+        - name: multi-cluster-kubeconfig
+          secret:
+            secretName: {{ .Values.multiCluster.kubeConfig }}
+            defaultMode: 420
         {{- end }}

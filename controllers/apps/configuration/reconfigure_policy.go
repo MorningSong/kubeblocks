@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -24,12 +24,15 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	appsv1 "github.com/apecloud/kubeblocks/apis/apps/v1"
 	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
-	workloads "github.com/apecloud/kubeblocks/apis/workloads/v1alpha1"
+	appsv1beta1 "github.com/apecloud/kubeblocks/apis/apps/v1beta1"
+	workloads "github.com/apecloud/kubeblocks/apis/workloads/v1"
+	configmanager "github.com/apecloud/kubeblocks/pkg/configuration/config_manager"
 	"github.com/apecloud/kubeblocks/pkg/configuration/core"
 	cfgproto "github.com/apecloud/kubeblocks/pkg/configuration/proto"
 	"github.com/apecloud/kubeblocks/pkg/configuration/util"
@@ -86,7 +89,7 @@ type reconfigureParams struct {
 	ConfigMap *corev1.ConfigMap
 
 	// ConfigConstraint pointer
-	ConfigConstraint *appsv1alpha1.ConfigConstraintSpec
+	ConfigConstraint *appsv1beta1.ConfigConstraintSpec
 
 	// For grpc factory
 	ReconfigureClientFactory createReconfigureClient
@@ -97,24 +100,16 @@ type reconfigureParams struct {
 	Client client.Client
 	Ctx    intctrlutil.RequestCtx
 
-	Cluster *appsv1alpha1.Cluster
+	Cluster *appsv1.Cluster
 
 	// Associated component for cluster.
-	ClusterComponent *appsv1alpha1.ClusterComponentSpec
+	ClusterComponent *appsv1.ClusterComponentSpec
 
 	// Associated component for component and component definition.
 	SynthesizedComponent *component.SynthesizedComponent
 
-	// Associated component for clusterdefinition.
-	// TODO(xingran): remove this field when test case is refactored.
-	Component *appsv1alpha1.ClusterComponentDefinition
-
-	// List of StatefulSets using this config template.
-	ComponentUnits []appsv1.StatefulSet
-	// List of Deployment using this config template.
-	DeploymentUnits []appsv1.Deployment
-	// List of ReplicatedStateMachine using this config template.
-	RSMList []workloads.ReplicatedStateMachine
+	// List of InstanceSet using this config template.
+	InstanceSetUnits []workloads.InstanceSet
 }
 
 var (
@@ -132,7 +127,7 @@ var (
 var upgradePolicyMap = map[appsv1alpha1.UpgradePolicy]reconfigurePolicy{}
 
 func init() {
-	RegisterPolicy(appsv1alpha1.AutoReload, &AutoReloadPolicy{})
+	RegisterPolicy(appsv1alpha1.AsyncDynamicReloadPolicy, &AutoReloadPolicy{})
 }
 
 // GetClientFactory support ut mock
@@ -161,12 +156,26 @@ func (param *reconfigureParams) maxRollingReplicas() int32 {
 		replicas       = param.getTargetReplicas()
 	)
 
-	if param.SynthesizedComponent == nil || param.SynthesizedComponent.MinAvailable == nil {
+	if param.SynthesizedComponent == nil {
+		return defaultRolling
+	}
+
+	var maxUnavailable *intstr.IntOrString
+	for _, its := range param.InstanceSetUnits {
+		if its.Spec.UpdateStrategy.RollingUpdate != nil {
+			maxUnavailable = its.Spec.UpdateStrategy.RollingUpdate.MaxUnavailable
+		}
+		if maxUnavailable != nil {
+			break
+		}
+	}
+
+	if maxUnavailable == nil {
 		return defaultRolling
 	}
 
 	// TODO(xingran&zhangtao): review this logic, set to nil in new API version
-	v, isPercentage, err := intctrlutil.GetIntOrPercentValue(nil)
+	v, isPercentage, err := intctrlutil.GetIntOrPercentValue(maxUnavailable)
 	if err != nil {
 		param.Ctx.Log.Error(err, "failed to get maxUnavailable!")
 		return defaultRolling
@@ -175,9 +184,9 @@ func (param *reconfigureParams) maxRollingReplicas() int32 {
 	if isPercentage {
 		r = int32(math.Floor(float64(v) * float64(replicas) / 100))
 	} else {
-		r = util.Safe2Int32(util.Min(v, param.getTargetReplicas()))
+		r = util.Safe2Int32(min(v, param.getTargetReplicas()))
 	}
-	return util.Max(r, defaultRolling)
+	return max(r, defaultRolling)
 }
 
 func (param *reconfigureParams) getTargetReplicas() int {
@@ -185,8 +194,8 @@ func (param *reconfigureParams) getTargetReplicas() int {
 }
 
 func (param *reconfigureParams) podMinReadySeconds() int32 {
-	minReadySeconds := param.ComponentUnits[0].Spec.MinReadySeconds
-	return util.Max(minReadySeconds, viper.GetInt32(constant.PodMinReadySecondsEnv))
+	minReadySeconds := param.SynthesizedComponent.MinReadySeconds
+	return max(minReadySeconds, viper.GetInt32(constant.PodMinReadySecondsEnv))
 }
 
 func RegisterPolicy(policy appsv1alpha1.UpgradePolicy, action reconfigurePolicy) {
@@ -199,28 +208,42 @@ func (receiver AutoReloadPolicy) Upgrade(params reconfigureParams) (ReturnedStat
 }
 
 func (receiver AutoReloadPolicy) GetPolicyName() string {
-	return string(appsv1alpha1.AutoReload)
+	return string(appsv1alpha1.AsyncDynamicReloadPolicy)
 }
 
-func NewReconfigurePolicy(cc *appsv1alpha1.ConfigConstraintSpec, cfgPatch *core.ConfigPatchInfo, policy appsv1alpha1.UpgradePolicy, restart bool) (reconfigurePolicy, error) {
+func NewReconfigurePolicy(cc *appsv1beta1.ConfigConstraintSpec, cfgPatch *core.ConfigPatchInfo, policy appsv1alpha1.UpgradePolicy, restart bool) (reconfigurePolicy, error) {
 	if cfgPatch != nil && !cfgPatch.IsModify {
 		// not walk here
 		return nil, core.MakeError("cfg not modify. [%v]", cfgPatch)
 	}
 
+	// if not specify policy, auto decision reconfiguring policy.
 	if enableAutoDecision(restart, policy) {
-		if dynamicUpdate, err := core.IsUpdateDynamicParameters(cc, cfgPatch); err != nil {
+		dynamicUpdate, err := core.IsUpdateDynamicParameters(cc, cfgPatch)
+		if err != nil {
 			return nil, err
-		} else if dynamicUpdate {
-			policy = appsv1alpha1.AutoReload
 		}
-		if enableSyncReload(policy, cc.ReloadOptions) {
-			policy = appsv1alpha1.OperatorSyncUpdate
+
+		// make decision
+		switch {
+		case !dynamicUpdate: // static parameters update
+		case configmanager.IsAutoReload(cc.ReloadAction): // if core support hot update, don't need to do anything
+			policy = appsv1alpha1.AsyncDynamicReloadPolicy
+		case enableSyncTrigger(cc.ReloadAction): // sync config-manager exec hot update
+			policy = appsv1alpha1.SyncDynamicReloadPolicy
+		default: // config-manager auto trigger to hot update
+			policy = appsv1alpha1.AsyncDynamicReloadPolicy
 		}
 	}
+
+	// if not specify policy, or cannot decision policy, use default policy.
 	if policy == appsv1alpha1.NonePolicy {
 		policy = appsv1alpha1.NormalPolicy
+		if cc.NeedDynamicReloadAction() && enableSyncTrigger(cc.ReloadAction) {
+			policy = appsv1alpha1.DynamicReloadAndRestartPolicy
+		}
 	}
+
 	if action, ok := upgradePolicyMap[policy]; ok {
 		return action, nil
 	}
@@ -231,21 +254,17 @@ func enableAutoDecision(restart bool, policy appsv1alpha1.UpgradePolicy) bool {
 	return !restart && policy == appsv1alpha1.NonePolicy
 }
 
-func enableSyncReload(policyType appsv1alpha1.UpgradePolicy, options *appsv1alpha1.ReloadOptions) bool {
-	return policyType == appsv1alpha1.AutoReload && enableSyncTrigger(options)
-}
-
-func enableSyncTrigger(options *appsv1alpha1.ReloadOptions) bool {
-	if options == nil {
+func enableSyncTrigger(reloadAction *appsv1beta1.ReloadAction) bool {
+	if reloadAction == nil {
 		return false
 	}
 
-	if options.TPLScriptTrigger != nil {
-		return !core.IsWatchModuleForTplTrigger(options.TPLScriptTrigger)
+	if reloadAction.TPLScriptTrigger != nil {
+		return !core.IsWatchModuleForTplTrigger(reloadAction.TPLScriptTrigger)
 	}
 
-	if options.ShellTrigger != nil {
-		return !core.IsWatchModuleForShellTrigger(options.ShellTrigger)
+	if reloadAction.ShellTrigger != nil {
+		return !core.IsWatchModuleForShellTrigger(reloadAction.ShellTrigger)
 	}
 	return false
 }
@@ -276,17 +295,7 @@ func makeReturnedStatus(status ExecStatus, ops ...func(status *ReturnedStatus)) 
 
 func fromWorkloadObjects(params reconfigureParams) []client.Object {
 	r := make([]client.Object, 0)
-	for _, unit := range params.RSMList {
-		r = append(r, &unit)
-	}
-	// migrated workload
-	if len(r) != 0 {
-		return r
-	}
-	for _, unit := range params.ComponentUnits {
-		r = append(r, &unit)
-	}
-	for _, unit := range params.DeploymentUnits {
+	for _, unit := range params.InstanceSetUnits {
 		r = append(r, &unit)
 	}
 	return r

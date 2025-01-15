@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	dockerapi "github.com/docker/docker/client"
 	"go.uber.org/zap"
@@ -111,7 +112,7 @@ func getExistsContainers(ctx context.Context, containerIDs []string, dc dockerap
 		optionsArgs.Add("id", containerID)
 	}
 
-	containers, err := dc.ContainerList(ctx, types.ContainerListOptions{
+	containers, err := dc.ContainerList(ctx, container.ListOptions{
 		All:     true,
 		Filters: optionsArgs,
 	})

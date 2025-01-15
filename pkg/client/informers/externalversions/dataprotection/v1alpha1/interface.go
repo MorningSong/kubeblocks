@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,12 +30,16 @@ type Interface interface {
 	Backups() BackupInformer
 	// BackupPolicies returns a BackupPolicyInformer.
 	BackupPolicies() BackupPolicyInformer
+	// BackupPolicyTemplates returns a BackupPolicyTemplateInformer.
+	BackupPolicyTemplates() BackupPolicyTemplateInformer
 	// BackupRepos returns a BackupRepoInformer.
 	BackupRepos() BackupRepoInformer
 	// BackupSchedules returns a BackupScheduleInformer.
 	BackupSchedules() BackupScheduleInformer
 	// Restores returns a RestoreInformer.
 	Restores() RestoreInformer
+	// StorageProviders returns a StorageProviderInformer.
+	StorageProviders() StorageProviderInformer
 }
 
 type version struct {
@@ -64,6 +68,11 @@ func (v *version) BackupPolicies() BackupPolicyInformer {
 	return &backupPolicyInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }
 
+// BackupPolicyTemplates returns a BackupPolicyTemplateInformer.
+func (v *version) BackupPolicyTemplates() BackupPolicyTemplateInformer {
+	return &backupPolicyTemplateInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
+}
+
 // BackupRepos returns a BackupRepoInformer.
 func (v *version) BackupRepos() BackupRepoInformer {
 	return &backupRepoInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
@@ -77,4 +86,9 @@ func (v *version) BackupSchedules() BackupScheduleInformer {
 // Restores returns a RestoreInformer.
 func (v *version) Restores() RestoreInformer {
 	return &restoreInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+}
+
+// StorageProviders returns a StorageProviderInformer.
+func (v *version) StorageProviders() StorageProviderInformer {
+	return &storageProviderInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
 }

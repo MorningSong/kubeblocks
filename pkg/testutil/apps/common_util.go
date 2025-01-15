@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -20,6 +20,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 package apps
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
@@ -51,7 +52,7 @@ func ResetToIgnoreFinalizers() {
 		"kubernetes.io/pvc-protection",
 		// REVIEW: adding following is a hack, if tests are running as
 		// controller-runtime manager setup.
-		constant.ConfigurationTemplateFinalizerName,
+		constant.ConfigFinalizerName,
 		constant.DBClusterFinalizerName,
 	}
 }
@@ -82,7 +83,7 @@ func ChangeObjStatus[T intctrlutil.Object, PT intctrlutil.PObject[T]](testCtx *t
 // Each helper returns a Gomega assertion function, which should be passed into
 // Eventually() or Consistently() as the first parameter.
 // Example:
-// Eventually(GetAndChangeObj(testCtx, key, func(fetched *appsv1alpha1.ClusterDefinition) {
+// Eventually(GetAndChangeObj(testCtx, key, func(fetched *appsv1.ClusterDefinition) {
 //		    // modify fetched clusterDef
 //      })).Should(Succeed())
 // Warning: these functions should NOT be used together with Expect().
@@ -120,7 +121,7 @@ func GetAndChangeObjStatus[T intctrlutil.Object, PT intctrlutil.PObject[T]](
 // Each helper returns a Gomega assertion function, which should be passed into
 // Eventually() or Consistently() as the first parameter.
 // Example:
-// Eventually(CheckObj(testCtx, key, func(g Gomega, fetched *appsv1alpha1.Cluster) {
+// Eventually(CheckObj(testCtx, key, func(g Gomega, fetched *appsv1.Cluster) {
 //   g.Expect(..).To(BeTrue()) // do some check
 // })).Should(Succeed())
 // Warning: these functions should NOT be used together with Expect().
@@ -158,7 +159,19 @@ func List[T intctrlutil.Object, PT intctrlutil.PObject[T],
 	return func(g gomega.Gomega) []T {
 		var objList L
 		g.Expect(testCtx.Cli.List(testCtx.Ctx, PL(&objList), opt...)).To(gomega.Succeed())
-		return reflect.ValueOf(&objList).Elem().FieldByName("Items").Interface().([]T)
+		value := reflect.ValueOf(&objList).Elem().FieldByName("Items").Interface()
+		switch v := value.(type) {
+		default:
+			return nil
+		case []T:
+			return v
+		case []*T:
+			var rets []T
+			for _, item := range v {
+				rets = append(rets, *item)
+			}
+			return rets
+		}
 	}
 }
 
@@ -321,7 +334,8 @@ func ClearResourcesWithRemoveFinalizerOption[T intctrlutil.Object, PT intctrluti
 		for _, obj := range items {
 			pobj := PT(&obj)
 			if pobj.GetDeletionTimestamp().IsZero() {
-				panic("expected DeletionTimestamp is not nil")
+				d, _ := json.Marshal(pobj)
+				panic("expected DeletionTimestamp is not nil, obj: " + string(d))
 			}
 			finalizers := pobj.GetFinalizers()
 			if len(finalizers) > 0 {
@@ -343,13 +357,9 @@ func ClearResourcesWithRemoveFinalizerOption[T intctrlutil.Object, PT intctrluti
 // environment without UseExistingCluster set, where garbage collection lacks.
 func ClearClusterResources(testCtx *testutil.TestContext) {
 	inNS := client.InNamespace(testCtx.DefaultNamespace)
-	ClearResources(testCtx, intctrlutil.ClusterSignature, inNS,
-		client.HasLabels{testCtx.TestObjLabelKey})
-	// finalizer of ConfigMap are deleted in ClusterDef&ClusterVersion controller
-	ClearResources(testCtx, intctrlutil.ClusterVersionSignature,
-		client.HasLabels{testCtx.TestObjLabelKey})
-	ClearResources(testCtx, intctrlutil.ClusterDefinitionSignature,
-		client.HasLabels{testCtx.TestObjLabelKey})
+	ClearResources(testCtx, intctrlutil.ClusterSignature, inNS, client.HasLabels{testCtx.TestObjLabelKey})
+	// finalizer of ConfigMap are deleted in ClusterDefinition controller
+	ClearResources(testCtx, intctrlutil.ClusterDefinitionSignature, client.HasLabels{testCtx.TestObjLabelKey})
 }
 
 // ClearClusterResourcesWithRemoveFinalizerOption clears all dependent resources belonging to existing clusters.
@@ -357,8 +367,8 @@ func ClearClusterResourcesWithRemoveFinalizerOption(testCtx *testutil.TestContex
 	inNs := client.InNamespace(testCtx.DefaultNamespace)
 	hasLabels := client.HasLabels{testCtx.TestObjLabelKey}
 	ClearResourcesWithRemoveFinalizerOption(testCtx, intctrlutil.ClusterSignature, true, inNs, hasLabels)
-	// finalizer of ConfigMap are deleted in ClusterDef & ClusterVersion controller
-	ClearResourcesWithRemoveFinalizerOption(testCtx, intctrlutil.ClusterVersionSignature, true, hasLabels)
+	// finalizer of ConfigMap are deleted in ClusterDefinition controller
 	ClearResourcesWithRemoveFinalizerOption(testCtx, intctrlutil.ClusterDefinitionSignature, true, hasLabels)
 	ClearResourcesWithRemoveFinalizerOption(testCtx, intctrlutil.ComponentDefinitionSignature, true, hasLabels)
+	ClearResourcesWithRemoveFinalizerOption(testCtx, intctrlutil.ComponentVersionSignature, true, hasLabels)
 }

@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -26,32 +26,29 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
+	appsv1 "github.com/apecloud/kubeblocks/apis/apps/v1"
+	appsv1beta1 "github.com/apecloud/kubeblocks/apis/apps/v1beta1"
 	"github.com/apecloud/kubeblocks/pkg/configuration/core"
+	cfgutil "github.com/apecloud/kubeblocks/pkg/configuration/util"
 	"github.com/apecloud/kubeblocks/pkg/controller/component"
-	intctrlutil "github.com/apecloud/kubeblocks/pkg/controllerutil"
 	testapps "github.com/apecloud/kubeblocks/pkg/testutil/apps"
 	testutil "github.com/apecloud/kubeblocks/pkg/testutil/k8s"
 )
 
 var _ = Describe("ConfigEnvFrom test", func() {
-
 	const (
-		clusterDefName     = "test-clusterdef"
-		clusterVersionName = "test-clusterversion"
-		clusterName        = "test-cluster"
-
-		mysqlCompDefName = "replicasets"
-		mysqlCompName    = "mysql"
+		compDefName   = "test-compdef"
+		clusterName   = "test-cluster"
+		mysqlCompName = "mysql"
 	)
+
 	var (
-		clusterDef     *appsv1alpha1.ClusterDefinition
-		clusterVersion *appsv1alpha1.ClusterVersion
-		cluster        *appsv1alpha1.Cluster
+		compDef *appsv1.ComponentDefinition
+		cluster *appsv1.Cluster
 
 		k8sMockClient    *testutil.K8sClientMockHelper
 		origCMObject     *corev1.ConfigMap
-		configConstraint *appsv1alpha1.ConfigConstraint
+		configConstraint *appsv1beta1.ConfigConstraint
 	)
 
 	BeforeEach(func() {
@@ -61,20 +58,16 @@ var _ = Describe("ConfigEnvFrom test", func() {
 			testCtx.UseDefaultNamespace())
 
 		configConstraint = testapps.NewCustomizedObj("config/envfrom-constraint.yaml",
-			&appsv1alpha1.ConfigConstraint{})
+			&appsv1beta1.ConfigConstraint{})
 
-		clusterDef = testapps.NewClusterDefFactory(clusterDefName).
-			AddComponentDef(testapps.StatefulMySQLComponent, mysqlCompDefName).
+		compDef = testapps.NewComponentDefinitionFactory(compDefName).
+			SetDefaultSpec().
 			AddConfigTemplate(cm.Name, cm.Name, configConstraint.Name, testCtx.DefaultNamespace, "mysql-config", testapps.DefaultMySQLContainerName).
 			GetObject()
-		clusterVersion = testapps.NewClusterVersionFactory(clusterVersionName, clusterDefName).
-			AddComponentVersion(mysqlCompDefName).
-			AddContainerShort("mysql", testapps.ApeCloudMySQLImage).
-			GetObject()
+
 		pvcSpec := testapps.NewPVCSpec("1Gi")
-		cluster = testapps.NewClusterFactory(testCtx.DefaultNamespace, clusterName,
-			clusterDef.Name, clusterVersion.Name).
-			AddComponent(mysqlCompName, mysqlCompDefName).
+		cluster = testapps.NewClusterFactory(testCtx.DefaultNamespace, clusterName, "").
+			AddComponent(mysqlCompName, compDef.Name).
 			AddVolumeClaimTemplate(testapps.DataVolumeName, pvcSpec).
 			GetObject()
 
@@ -88,11 +81,10 @@ var _ = Describe("ConfigEnvFrom test", func() {
 
 	Context("test config template inject envfrom", func() {
 		It("should inject success", func() {
-			reqCtx := intctrlutil.RequestCtx{
-				Ctx: ctx,
-				Log: logger,
-			}
-			synthesizeComp, err := component.BuildSynthesizedComponentWrapper4Test(reqCtx, testCtx.Cli, clusterDef, clusterVersion, cluster, &cluster.Spec.ComponentSpecs[0])
+			comp, err := component.BuildComponent(cluster, &cluster.Spec.ComponentSpecs[0], nil, nil)
+			Expect(err).Should(Succeed())
+
+			synthesizeComp, err := component.BuildSynthesizedComponent(ctx, testCtx.Cli, compDef, comp, cluster)
 			Expect(err).Should(Succeed())
 
 			podSpec := &corev1.PodSpec{
@@ -102,53 +94,67 @@ var _ = Describe("ConfigEnvFrom test", func() {
 					},
 				},
 			}
-			k8sMockClient.MockGetMethod(testutil.WithGetReturned(testutil.WithConstructSimpleGetResult([]client.Object{
-				origCMObject,
-				configConstraint,
-			}), testutil.WithAnyTimes()))
-			k8sMockClient.MockCreateMethod(testutil.WithCreateReturned(testutil.WithCreatedFailedResult(), testutil.WithTimes(1)),
-				testutil.WithCreateReturned(testutil.WithCreatedSucceedResult(), testutil.WithAnyTimes()))
+			k8sMockClient.MockGetMethod(
+				testutil.WithGetReturned(testutil.WithConstructSimpleGetResult([]client.Object{
+					origCMObject,
+					configConstraint,
+				}), testutil.WithAnyTimes()))
+			k8sMockClient.MockCreateMethod(
+				testutil.WithCreateReturned(testutil.WithCreatedFailedResult(), testutil.WithTimes(1)),
+				testutil.WithCreateReturned(testutil.WithCreatedSucceedResult(), testutil.WithAnyTimes()),
+			)
 
-			Expect(injectTemplateEnvFrom(cluster, synthesizeComp, podSpec, k8sMockClient.Client(), reqCtx.Ctx, nil)).ShouldNot(Succeed())
-			Expect(injectTemplateEnvFrom(cluster, synthesizeComp, podSpec, k8sMockClient.Client(), reqCtx.Ctx, nil)).Should(Succeed())
+			synthesizeComp.ConfigTemplates[0].AsSecret = cfgutil.ToPointer(true)
+			Expect(injectTemplateEnvFrom(cluster, synthesizeComp, podSpec, k8sMockClient.Client(), ctx, nil)).ShouldNot(Succeed())
+			Expect(injectTemplateEnvFrom(cluster, synthesizeComp, podSpec, k8sMockClient.Client(), ctx, nil)).Should(Succeed())
 		})
 
-		It("should SyncEnvConfigmap success", func() {
-			configSpec := clusterDef.Spec.ComponentDefs[0].ConfigSpecs[0]
+		It("should SyncEnvSourceObject success", func() {
+			configSpec := compDef.Spec.Configs[0]
 			configSpec.Keys = []string{"env-config"}
 
+			comp, err := component.BuildComponent(cluster, &cluster.Spec.ComponentSpecs[0], nil, nil)
+			Expect(err).Should(Succeed())
+
+			synthesizeComp, err := component.BuildSynthesizedComponent(ctx, testCtx.Cli, compDef, comp, cluster)
+			Expect(err).Should(Succeed())
+
 			cmObj := origCMObject.DeepCopy()
 			cmObj.SetName(core.GenerateEnvFromName(origCMObject.Name))
 			k8sMockClient.MockGetMethod(testutil.WithGetReturned(testutil.WithConstructSimpleGetResult([]client.Object{
 				cmObj,
 				configConstraint,
 			}), testutil.WithAnyTimes()))
-			k8sMockClient.MockPatchMethod(testutil.WithFailed(core.MakeError("failed to patch"), testutil.WithTimes(1)),
+			k8sMockClient.MockUpdateMethod(testutil.WithFailed(core.MakeError("failed to patch"), testutil.WithTimes(1)),
 				testutil.WithSucceed(), testutil.WithAnyTimes())
 
-			Expect(SyncEnvConfigmap(configSpec, origCMObject, &configConstraint.Spec, k8sMockClient.Client(), ctx)).ShouldNot(Succeed())
-			Expect(SyncEnvConfigmap(configSpec, origCMObject, &configConstraint.Spec, k8sMockClient.Client(), ctx)).Should(Succeed())
+			Expect(SyncEnvSourceObject(configSpec, origCMObject, &configConstraint.Spec, k8sMockClient.Client(), ctx, cluster, synthesizeComp)).ShouldNot(Succeed())
+			Expect(SyncEnvSourceObject(configSpec, origCMObject, &configConstraint.Spec, k8sMockClient.Client(), ctx, cluster, synthesizeComp)).Should(Succeed())
 		})
 
-		It("SyncEnvConfigmap abnormal test", func() {
-			configSpec := clusterDef.Spec.ComponentDefs[0].ConfigSpecs[0]
-			configSpec.AsEnvFrom = nil
-			Expect(SyncEnvConfigmap(configSpec, origCMObject, &configConstraint.Spec, k8sMockClient.Client(), ctx)).Should(Succeed())
+		It("SyncEnvSourceObject abnormal test", func() {
+			comp, err := component.BuildComponent(cluster, &cluster.Spec.ComponentSpecs[0], nil, nil)
+			Expect(err).Should(Succeed())
 
-			configSpec.AsEnvFrom = nil
+			synthesizeComp, err := component.BuildSynthesizedComponent(ctx, testCtx.Cli, compDef, comp, cluster)
+			Expect(err).Should(Succeed())
+
+			configSpec := compDef.Spec.Configs[0]
+			configSpec.InjectEnvTo = nil
+			Expect(SyncEnvSourceObject(configSpec, origCMObject, &configConstraint.Spec, k8sMockClient.Client(), ctx, cluster, synthesizeComp)).Should(Succeed())
+
+			configSpec.InjectEnvTo = nil
 			cmObj := origCMObject.DeepCopy()
 			cmObj.SetName(core.GenerateEnvFromName(origCMObject.Name))
 			k8sMockClient.MockGetMethod(testutil.WithGetReturned(testutil.WithConstructSimpleGetResult([]client.Object{
 				cmObj,
 				configConstraint,
 			}), testutil.WithAnyTimes()))
-			k8sMockClient.MockPatchMethod(testutil.WithSucceed(testutil.WithAnyTimes()))
+			k8sMockClient.MockUpdateMethod(testutil.WithSucceed(testutil.WithAnyTimes()))
 
-			configSpec = clusterDef.Spec.ComponentDefs[0].ConfigSpecs[0]
+			configSpec = compDef.Spec.Configs[0]
 			configSpec.Keys = []string{"env-config", "not-exist"}
-			Expect(SyncEnvConfigmap(configSpec, origCMObject, &configConstraint.Spec, k8sMockClient.Client(), ctx)).Should(Succeed())
+			Expect(SyncEnvSourceObject(configSpec, origCMObject, &configConstraint.Spec, k8sMockClient.Client(), ctx, cluster, synthesizeComp)).Should(Succeed())
 		})
-
 	})
-
 })

@@ -17,18 +17,29 @@ import TabItem from '@theme/TabItem';
 
 ### 开始之前
 
-* 如果想通过 kbcli 创建和连接 PostgreSQL 集群，请先[安装 kbcli](./../../installation/install-with-kbcli/install-kbcli.md)。
-* 用 [kbcli](./../../installation/install-with-kbcli/install-kubeblocks-with-kbcli.md) 或 [Helm](./../../installation/install-with-helm/install-kubeblocks-with-helm.md) 安装 KubeBlocks。
-* 确保 PostgreSQL 引擎已启用。
+* 如果您想通过 `kbcli` 创建并连接 PostgreSQL 集群，请先[安装 kbcli](./../../installation/install-kbcli.md)。
+* [安装 KubeBlocks](./../../installation/install-kubeblocks.md)。
+* 确保 PostgreSQL 引擎已启用。KubeBlocks 默认已安装 PostreSQL，如果您在安装 KubeBlocks 时关闭/卸载了该引擎，可参考相关文档，再次[启用/安装该引擎](./../../installation/install-addons.md)。
   
   <Tabs>
 
-  <TabItem value="kbcli" label="kbcli" default>
-  
+  <TabItem value="kubectl" label="kubectl" default>
+
+  ```bash
+  kubectl get addons.extensions.kubeblocks.io postgresql
+  >
+  NAME         TOPOLOGIES   SERVICEREFS   STATUS      AGE
+  postgresql                              Available   30m
+  ```
+
+  </TabItem>
+
+  <TabItem value="kbcli" label="kbcli">
+
   ```bash
   kbcli addon list
   >
-  NAME                       TYPE   STATUS     EXTRAS         AUTO-INSTALL   INSTALLABLE-SELECTOR
+  NAME                       TYPE   STATUS     EXTRAS         AUTO-INSTALL   
   ...
   postgresql                 Helm   Enabled                   true
   ...
@@ -36,47 +47,45 @@ import TabItem from '@theme/TabItem';
 
   </TabItem>
 
-  <TabItem value="kubectl" label="kubectl">
-
-  ```bash
-  kubectl get addons.extensions.kubeblocks.io postgresql
-  >
-  NAME         TYPE   STATUS    AGE
-  postgresql   Helm   Enabled   23m
-  ```
-
-  </TabItem>
   </Tabs>
 
 * 查看可用于创建集群的数据库类型和版本。
 
   <Tabs>
 
-  <TabItem value="kbcli" label="kbcli" default>
+  <TabItem value="kubectl" label="kubectl" default>
+
+  确认 `postgresql` cluster definition 是否已安装。
+  
+  ```bash
+  kubectl get clusterdefinition postgresql
+  >
+  NAME         TOPOLOGIES   SERVICEREFS   STATUS      AGE
+  postgresql                              Available   30m
+  ```
+
+  查看可用于创建集群的版本。
 
   ```bash
-  kbcli clusterdefinition list
-
-  kbcli clusterversion list
+  kubectl get clusterversions -l clusterdefinition.kubeblocks.io/name=postgresql
+  >
+  NAME                 CLUSTER-DEFINITION   STATUS      AGE
+  postgresql-12.14.0   postgresql           Available   30m
+  postgresql-12.14.1   postgresql           Available   30m
+  postgresql-12.15.0   postgresql           Available   30m
+  postgresql-14.7.2    postgresql           Available   30m
+  postgresql-14.8.0    postgresql           Available   30m
+  postgresql-15.7.0    postgresql           Available   30m
+  postgresql-16.4.0    postgresql           Available   30m
   ```
 
   </TabItem>
 
-  <TabItem value="kubectl" label="kubectl">
-  
-  查看 `postgresql` 集群定义是否可用。
+  <TabItem value="kbcli" label="kbcli">
 
   ```bash
-  kubectl get clusterdefinition postgresql
-  >
-  NAME         MAIN-COMPONENT-NAME   STATUS      AGE
-  postgresql   postgresql            Available   25m
-  ```
-
-  查看可用于创建集群的所有版本。
-
-  ```bash
-  kubectl get clusterversions -l clusterdefinition.kubeblocks.io/name=postgresql
+  kbcli clusterdefinition list
+  kbcli clusterversion list
   ```
 
   </TabItem>
@@ -91,216 +100,139 @@ import TabItem from '@theme/TabItem';
 
 ### 创建集群
 
-KubeBlocks 支持创建两种 PostgreSQL 集群：单机版（Standalone）和集群版（RaftGroup）。单机版仅支持一个副本，适用于对可用性要求较低的场景。 对于高可用性要求较高的场景，建议创建集群版，以支持自动故障切换。为了确保高可用性，所有的副本都默认分布在不同的节点上。
+KubeBlocks 支持创建两种 PostgreSQL 集群：单机版（Standalone）和主备版（Replication）。单机版仅支持一个副本，适用于对可用性要求较低的场景。 对于高可用性要求较高的场景，建议创建集群版，以支持自动故障切换。为了确保高可用性，所有的副本都默认分布在不同的节点上。
 
 <Tabs>
 
-<TabItem value="kbcli" label="kbcli" default>
+<TabItem value="kubectl" label="kubectl" default>
 
-创建 PostgreSQL 单机版。
+1. 创建 PostgreSQL 集群。
 
-```bash
-kbcli cluster create postgresql <clustername>
-```
+   KubeBlocks 通过 `Cluster` 定义集群。以下是创建 PostgreSQL 主备版的示例。如果您只有一个节点可用于部署主备版集群，可设置 `spec.schedulingPolicy` 或 `spec.componentSpecs.schedulingPolicy`，具体可参考 [API 文档](https://kubeblocks.io/docs/preview/developer_docs/api-reference/cluster#apps.kubeblocks.io/v1.SchedulingPolicy)。但生产环境中，不建议将所有副本部署在同一个节点上，因为这可能会降低集群的可用性。
 
-创建 PostgreSQL 集群版。
+   ```yaml
+   cat <<EOF | kubectl apply -f -
+   apiVersion: apps.kubeblocks.io/v1
+   kind: Cluster
+   metadata:
+     name: mycluster
+     namespace: demo
+   spec:
+     terminationPolicy: Delete
+     clusterDef: postgresql
+     topology: replication
+     componentSpecs:
+       - name: postgresql
+         serviceVersion: "14.7.2"
+         disableExporter: false
+         labels:
+           # Note: DO NOT REMOVE THIS LABEL
+           apps.kubeblocks.postgres.patroni/scope: mycluster-postgresql
+         replicas: 2
+         resources:
+           limits:
+             cpu: "0.5"
+             memory: "0.5Gi"
+           requests:
+             cpu: "0.5"
+             memory: "0.5Gi"
+         volumeClaimTemplates:
+           - name: data
+             spec:
+               storageClassName: ""
+               accessModes:
+                 - ReadWriteOnce
+               resources:
+                 requests:
+                   storage: 20Gi
+   EOF
+   ```
 
-```bash
-kbcli cluster create postgresql --mode replication <clustername>
-```
+   | 字段                                   | 定义  |
+   |---------------------------------------|--------------------------------------|
+   | `spec.terminationPolicy`              | 集群终止策略，有效值为 `DoNotTerminate`、`Delete` 和 `WipeOut`。具体定义可参考 [终止策略](./delete-a-postgresql-cluster.md#终止策略)。 |
+   | `spec.clusterDef` | 指定了创建集群时要使用的 ClusterDefinition 的名称。**注意**：**请勿更新此字段**。创建 PostgreSQL 集群时，该值必须为 `postgresql`。 |
+   | `spec.topology` | 指定了在创建集群时要使用的 ClusterTopology 的名称。建议值为 [replication]。 |
+   | `spec.componentSpecs`                 | 集群 component 列表，定义了集群 components。该字段支持自定义配置集群中每个 component。  |
+   | `spec.componentSpecs.serviceVersion`  | 定义了 component 部署的服务版本。有效值为 [12.14.0,12.14.1,12.15.0,14.7.2,14.8.0,15.7.0,16.4.0] |
+   | `spec.componentSpecs.disableExporter` | 定义了是否在 component 无头服务（headless service）上标注指标 exporter 信息，是否开启监控 exporter。有效值为 [true, false]。 |
+   | `spec.componentSpecs.labels` | 指定了要覆盖或添加的标签，这些标签将应用于 component 所拥有的底层 Pod、PVC、账号和 TLS 密钥以及服务。 |
+   | `spec.componentSpecs.labels.apps.kubeblocks.postgres.patroni/scope` | PostgreSQL 的 `ComponentDefinition` 指定了环境变量 `KUBERNETES_SCOPE_LABEL=apps.kubeblocks.postgres.patroni/scope`。该变量定义了 Patroni 用于标记 Kubernetes 资源的标签键，帮助 Patroni 识别哪些资源属于指定的范围（或集群）。**注意**：**不要删除此标签**。该值必须遵循 `<cluster.metadata.name>-postgresql` 格式。例如，如果你的集群名称是 `mycluster`，则该值应为 `mycluster-postgresql`。可按需将 `mycluster` 替换为你的实际集群名称。  |
+   | `spec.componentSpecs.replicas`        | 定义了 component 中 replicas 的数量。 |
+   | `spec.componentSpecs.resources`       | 定义了 component 的资源要求。  |
+   | `spec.componentSpecs.volumeClaimTemplates` | PersistentVolumeClaim 模板列表，定义 component 的存储需求。 |
+   | `spec.componentSpecs.volumeClaimTemplates.name` | 引用了在 `componentDefinition.spec.runtime.containers[*].volumeMounts` 中定义的 volumeMount 名称。  |
+   | `spec.componentSpecs.volumeClaimTemplates.spec.storageClassName` | 定义了 StorageClass 的名称。如果未指定，系统将默认使用带有 `storageclass.kubernetes.io/is-default-class=true` 注释的 StorageClass。  |
+   | `spec.componentSpecs.volumeClaimTemplates.spec.resources.storage` | 可按需配置存储容量。 |
 
-如果只有一个节点用于部署集群版，请在创建集群时将 `availability-policy` 设置为 `none`。
+   您可参考 [API 文档](https://kubeblocks.io/docs/preview/developer_docs/api-reference/cluster)，查看更多 API 字段及说明。
 
-```bash
-kbcli cluster create postgresql --mode replication --availability-policy none <clustername>
-```
+   KubeBlocks operator 监控 `Cluster` CRD 并创建集群和全部依赖资源。您可执行以下命令获取集群创建的所有资源信息。
 
-:::note
+   ```bash
+   kubectl get all,secret,rolebinding,serviceaccount -l app.kubernetes.io/instance=mycluster -n demo
+   ```
 
-* 在生产环境中，不建议将所有副本部署在同一个节点上，因为这可能会降低集群的可用性。
-* 执行以下命令，查看创建 PostgreSQL 集群的选项和默认值。
-  
-  ```bash
-  kbcli cluster create postgresql -h
-  ```
+   执行以下命令，查看已创建的 PostgreSQL 集群：
 
-:::
+   ```bash
+   kubectl get cluster mycluster -n demo -o yaml
+   ```
+
+2. 验证集群是否创建成功。
+
+   ```bash
+   kubectl get cluster mycluster -n demo
+   >
+   NAME        CLUSTER-DEFINITION   VERSION             TERMINATION-POLICY   STATUS    AGE
+   mycluster   postgresql           postgresql-14.8.0   Delete               Running   9m21s
+   ```
 
 </TabItem>
 
-<TabItem value="kubectl" label="kubectl">
+<TabItem value="kbcli" label="kbcli">
 
-KubeBlocks 实现了用 Cluster CRD 来定义集群。比如，可以通过下面的命令创建一个 PostgreSQL 单机版：
+1. 创建 PostgreSQL 集群。
 
-  ```bash
-  cat <<EOF | kubectl apply -f -
-  apiVersion: apps.kubeblocks.io/v1alpha1
-  kind: Cluster
-  metadata:
-    name: pg-cluster
-    namespace: demo
-    labels: 
-      helm.sh/chart: postgresql-cluster-0.6.0-alpha.36
-      app.kubernetes.io/version: "14.8.0"
-      app.kubernetes.io/instance: pg
-  spec:
-    clusterVersionRef: postgresql-14.8.0
-    terminationPolicy: Delete  
-    affinity:
-      podAntiAffinity: Preferred
-      topologyKeys:
-        - kubernetes.io/hostname
-      tenancy: SharedNode
-    clusterDefinitionRef: postgresql
-    componentSpecs:
-      - name: postgresql
-        componentDefRef: postgresql      
-        monitor: false      
-        replicas: 1
-        enabledLogs:
-          - running
-        serviceAccountName: kb-pg
-        switchPolicy:
-          type: Noop      
-        resources:
-          limits:
-            cpu: "0.5"
-            memory: "0.5Gi"
-          requests:
-            cpu: "0.5"
-            memory: "0.5Gi"      
-        volumeClaimTemplates:
-          - name: data # ref clusterDefinition components.containers.volumeMounts.name
-            spec:
-              accessModes:
-                - ReadWriteOnce
-              resources:
-                requests:
-                  storage: 20Gi      
-        services:
-  EOF
-  ```
+   以下为创建单机版的示例。
 
-* `spec.clusterDefinitionRef` 是集群定义 CRD 的名称，用来定义集群组件。
-* `spec.clusterVersionRef` 是集群版本 CRD 的名称，用来定义集群版本。
-* `spec.componentSpecs` 是组件列表，用来定义集群组件。
-* `spec.componentSpecs.componentDefRef` 是组件定义的名称，在 ClusterDefinition 中定义。你可以使用 `kubectl get clusterdefinition postgresql -o json | jq '.spec.componentDefs[].name'` 获取组件定义的名称。
-* `spec.componentSpecs.name` 是组件的名称。
-* `spec.componentSpecs.replicas` 是组件的副本数。
-* `spec.componentSpecs.resources` 是组件的资源要求。
-* `spec.componentSpecs.volumeClaimTemplates` 是卷声明模板的列表，用于定义组件的卷声明模板。
-* `spec.terminationPolicy` 是集群的终止策略，默认值为 Delete，有效值为 DoNotTerminate、Halt、Delete 和 WipeOut。DoNotTerminate 禁止一切删除操作。Halt 会删除工作负载资源，如 statefulset 和 deployment 等，但是保留 PVC 。Delete 在 Halt 的基础上进一步删除了 PVC。WipeOut 在 Delete 的基础上从备份存储的位置完全删除所有卷快照和快照数据。
+   ```bash
+   kbcli cluster create postgresql mycluster -n demo
+   ```
 
-KubeBlocks operator 监听 `Cluster` CRD，并创建集群及其依赖资源。你可以使用以下命令获取该集群创建的所有资源。
+   如果您需要自定义集群规格，kbcli 也提供了诸多参数，如支持设置引擎版本、终止策略、CPU、内存规格。您可通过在命令结尾添加 `--help` 或 `-h` 来查看具体说明。比如，
 
-```bash
-kubectl get all,secret,rolebinding,serviceaccount -l app.kubernetes.io/instance=pg-cluster -n demo
-```
+   ```bash
+   kbcli cluster create postgresql --help
 
-查看所创建的 PostgreSQL 集群对象：
+   kbcli cluster create postgresql -h
+   ```
 
-```bash
-kubectl get cluster pg-cluster -n demo -o yaml
-```
+   例如，您可以使用 `--replicas` 指定副本数，创建主备版集群。
 
-<details>
+   ```bash
+   kbcli cluster create postgresql mycluster --replicas=2 -n demo
+   ```
 
-<summary>输出</summary>
+   如果您只有一个节点用于部署主备版集群，可在创建集群时配置集群亲和性，配置 `--pod-anti-affinity`, `--tolerations` 和 `--topology-keys`。但需要注意的是，生产环境中，不建议将所有副本部署在同一个节点上，因为这可能会降低集群的可用性。例如，
 
-```yaml
-apiVersion: apps.kubeblocks.io/v1alpha1
-kind: Cluster
-metadata:
-  annotations:
-    kubectl.kubernetes.io/last-applied-configuration: |
-      {"apiVersion":"apps.kubeblocks.io/v1alpha1","kind":"Cluster","metadata":{"annotations":{},"labels":{"app.kubernetes.io/instance":"pg","app.kubernetes.io/version":"14.8.0","helm.sh/chart":"postgresql-cluster-0.6.0-alpha.36"},"name":"pg-cluster","namespace":"demo"},"spec":{"affinity":{"podAntiAffinity":"Preferred","tenancy":"SharedNode","topologyKeys":["kubernetes.io/hostname"]},"clusterDefinitionRef":"postgresql","clusterVersionRef":"postgresql-14.8.0","componentSpecs":[{"componentDefRef":"postgresql","enabledLogs":["running"],"monitor":false,"name":"postgresql","replicas":1,"resources":{"limits":{"cpu":"0.5","memory":"0.5Gi"},"requests":{"cpu":"0.5","memory":"0.5Gi"}},"serviceAccountName":"kb-pg","services":null,"switchPolicy":{"type":"Noop"},"volumeClaimTemplates":[{"name":"data","spec":{"accessModes":["ReadWriteOnce"],"resources":{"requests":{"storage":"20Gi"}}}}]}],"terminationPolicy":"Delete"}}
-  creationTimestamp: "2023-07-19T07:53:07Z"
-  finalizers:
-  - cluster.kubeblocks.io/finalizer
-  generation: 1
-  labels:
-    app.kubernetes.io/instance: pg
-    app.kubernetes.io/version: 14.8.0
-    clusterdefinition.kubeblocks.io/name: postgresql
-    clusterversion.kubeblocks.io/name: postgresql-14.8.0
-    helm.sh/chart: postgresql-cluster-0.6.0-alpha.36
-  name: pg-cluster
-  namespace: demo
-  resourceVersion: "8618"
-  uid: c9f73d21-b79b-4956-aad0-a4e677cb8ba1
-spec:
-  affinity:
-    podAntiAffinity: Preferred
-    tenancy: SharedNode
-    topologyKeys:
-    - kubernetes.io/hostname
-  clusterDefinitionRef: postgresql
-  clusterVersionRef: postgresql-14.8.0
-  componentSpecs:
-  - componentDefRef: postgresql
-    enabledLogs:
-    - running
-    monitor: false
-    name: postgresql
-    noCreatePDB: false
-    replicas: 1
-    resources:
-      limits:
-        cpu: "0.5"
-        memory: 0.5Gi
-      requests:
-        cpu: "0.5"
-        memory: 0.5Gi
-    serviceAccountName: kb-pg
-    switchPolicy:
-      type: Noop
-    volumeClaimTemplates:
-    - name: data
-      spec:
-        accessModes:
-        - ReadWriteOnce
-        resources:
-          requests:
-            storage: 20Gi
-  terminationPolicy: Delete
-status:
-  clusterDefGeneration: 2
-  components:
-    postgresql:
-      phase: Running
-      podsReady: true
-      podsReadyTime: "2023-07-19T07:53:43Z"
-      replicationSetStatus:
-        primary:
-          pod: pg-cluster-postgresql-0
-  conditions:
-  - lastTransitionTime: "2023-07-19T07:53:07Z"
-    message: 'The operator has started the provisioning of Cluster: pg-cluster'
-    observedGeneration: 1
-    reason: PreCheckSucceed
-    status: "True"
-    type: ProvisioningStarted
-  - lastTransitionTime: "2023-07-19T07:53:07Z"
-    message: Successfully applied for resources
-    observedGeneration: 1
-    reason: ApplyResourcesSucceed
-    status: "True"
-    type: ApplyResources
-  - lastTransitionTime: "2023-07-19T07:53:43Z"
-    message: all pods of components are ready, waiting for the probe detection successful
-    reason: AllReplicasReady
-    status: "True"
-    type: ReplicasReady
-  - lastTransitionTime: "2023-07-19T07:53:43Z"
-    message: 'Cluster: pg-cluster is ready, current phase is Running'
-    reason: ClusterReady
-    status: "True"
-    type: Ready
-  observedGeneration: 1
-  phase: Running
-```
+   ```bash
+   kbcli cluster create postgresql mycluster \
+       --mode='replication' \
+       --pod-anti-affinity='Preferred' \
+       --tolerations='node-role.kubeblocks.io/data-plane:NoSchedule' \
+       --topology-keys='null' \
+       --namespace demo
+   ```
 
-</details>
+2. 验证集群是否创建成功。
+
+   ```bash
+   kbcli cluster list -n demo
+   >
+   NAME        NAMESPACE   CLUSTER-DEFINITION   VERSION             TERMINATION-POLICY   STATUS    CREATED-TIME
+   mycluster   demo        postgresql           postgresql-14.8.0   Delete               Running   Sep 28,2024 16:47 UTC+0800
+   ```
 
 </TabItem>
 
@@ -310,44 +242,36 @@ status:
 
 <Tabs>
 
-<TabItem value="kbcli" label="kbcli" default>
-
-```bash
-kbcli cluster connect <clustername>  --namespace <name>
-```
-
-</TabItem>
-
-<TabItem value="kubectl" label="kubectl">
+<TabItem value="kubectl" label="kubectl" default>
 
 使用 `kubectl exec` 命令进入 Pod 并连接到数据库。
 
-KubeBlocks operator 会创建一个名为 `pg-cluster-conn-credential` 的新的 Secret 来存储 PostgreSQL 集群的连接凭证。该 Secret 包含以下 key：
+KubeBlocks operator 会创建一个名为 `mycluster-conn-credential` 的新的 Secret 来存储集群的连接凭证。该 Secret 包含以下 key：
 
 * `username`：PostgreSQL 集群的根用户名。
 * `password`：根用户的密码。
-* `port`：PostgreSQL 集群的端口。
+* `port`：PostgreSQL集群的端口。
 * `host`：PostgreSQL 集群的主机。
-* `endpoint`：PostgreSQL 集群的终端节点，与 host:port 相同。
+* `endpoint`：PostgreSQL 集群的终端节点，与 `host:port` 相同。
 
 1. 获取用于 `kubectl exec` 命令的 `username` 和 `password`。
 
    ```bash
-   kubectl get secrets -n demo pg-cluster-conn-credential -o jsonpath='{.data.\username}' | base64 -d
+   kubectl get secrets -n demo mycluster-conn-credential -o jsonpath='{.data.username}' | base64 -d
    >
    postgres
 
-   kubectl get secrets -n demo pg-cluster-conn-credential -o jsonpath='{.data.\password}' | base64 -d
+   kubectl get secrets -n demo mycluster-conn-credential -o jsonpath='{.data.password}' | base64 -d
    >
    h62rg2kl
    ```
 
-2. 使用用户名和密码，进入 Pod `pg-cluster-postgresql-0` 并连接到数据库。
+2. 使用用户名和密码，进入 Pod `mycluster-postgresql-0` 并连接到数据库。
 
    ```bash
-   kubectl exec -ti -n demo pg-cluster-postgresql-0 -- bash
+   kubectl exec -ti -n demo mycluster-postgresql-0 -- bash
 
-   root@pg-cluster-postgresql-0:/home/postgres# psql -U postgres -W
+   root@mycluster-postgresql-0:/home/postgres# psql -U postgres -W
    Password: h62rg2kl
    ```
 
@@ -355,23 +279,31 @@ KubeBlocks operator 会创建一个名为 `pg-cluster-conn-credential` 的新的
 
 <TabItem value="port-forward" label="port-forward">
 
-你还可以使用端口转发在本地计算机上连接数据库。
+还可以使用端口转发在本地计算机上连接数据库。
 
-1. 端口转发服务。
+1. 通过端口转发服务。
 
    ```bash
-   kubectl port-forward -n demo svc/pg-cluster-postgresql 5432:5432 
+   kubectl port-forward -n demo svc/mycluster-postgresql 5432:5432 
    ```
 
 2. 在新的终端窗口中执行以下命令，连接到数据库。
 
    ```bash
-   root@pg-cluster-postgresql-0:/home/postgres# psql -U postgres -W
+   root@mycluster-postgresql-0:/home/postgres# psql -U postgres -W
    Password: h62rg2kl
    ```
 
 </TabItem>
 
+<TabItem value="kbcli" label="kbcli">
+
+```bash
+kbcli cluster connect mycluster  --namespace demo
+```
+
+</TabItem>
+
 </Tabs>
 
-有关详细的数据库连接指南，请参考[连接数据库](./../../create-and-connect-databases/overview-on-connect-databases.md)。
+有关详细的数据库连接指南，请参考[连接数据库](./../../connect-databases/overview-on-connect-databases.md)。

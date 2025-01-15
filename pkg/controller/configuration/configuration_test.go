@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -20,91 +20,81 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 package configuration
 
 import (
+	"fmt"
+
 	. "github.com/onsi/gomega"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
+	appsv1 "github.com/apecloud/kubeblocks/apis/apps/v1"
 	"github.com/apecloud/kubeblocks/pkg/controller/component"
-	intctrlutil "github.com/apecloud/kubeblocks/pkg/controllerutil"
 	testapps "github.com/apecloud/kubeblocks/pkg/testutil/apps"
 )
 
-const clusterDefName = "test-clusterdef"
-const clusterVersionName = "test-clusterversion"
-const clusterName = "test-cluster"
-const mysqlCompDefName = "replicasets"
-const scriptConfigName = "test-script-config"
-const configSpecName = "test-config-spec"
-const mysqlCompName = "mysql"
-const mysqlConfigName = "mysql-component-config"
-const mysqlConfigConstraintName = "mysql8.0-config-constraints"
-const mysqlScriptsConfigName = "apecloud-mysql-scripts"
-const testConfigContent = "test-config-content"
+const (
+	compDefName               = "test-compdef"
+	clusterName               = "test-cluster"
+	configTemplateName        = "test-config-template"
+	scriptTemplateName        = "test-script-template"
+	mysqlCompName             = "mysql"
+	mysqlConfigName           = "mysql-component-config"
+	mysqlConfigConstraintName = "mysql8.0-config-constraints"
+	mysqlScriptsTemplateName  = "apecloud-mysql-scripts"
+)
 
-func allFieldsClusterDefObj(needCreate bool) *appsv1alpha1.ClusterDefinition {
-	clusterDefObj := testapps.NewClusterDefFactory(clusterDefName).
-		AddComponentDef(testapps.StatefulMySQLComponent, mysqlCompDefName).
-		AddScriptTemplate(scriptConfigName, mysqlScriptsConfigName, testCtx.DefaultNamespace, testapps.ScriptsVolumeName, nil).
-		AddConfigTemplate(configSpecName, mysqlConfigName, mysqlConfigConstraintName, testCtx.DefaultNamespace, testapps.ConfVolumeName).
+func allFieldsCompDefObj(create bool) *appsv1.ComponentDefinition {
+	compDef := testapps.NewComponentDefinitionFactory(compDefName).
+		SetDefaultSpec().
+		AddConfigTemplate(configTemplateName, mysqlConfigName, mysqlConfigConstraintName, testCtx.DefaultNamespace, testapps.ConfVolumeName).
+		AddScriptTemplate(scriptTemplateName, mysqlScriptsTemplateName, testCtx.DefaultNamespace, testapps.ScriptsVolumeName, nil).
 		GetObject()
-	if needCreate {
-		Expect(testCtx.CreateObj(testCtx.Ctx, clusterDefObj)).Should(Succeed())
+	if create {
+		Expect(testCtx.CreateObj(testCtx.Ctx, compDef)).Should(Succeed())
 	}
-	return clusterDefObj
+	return compDef
 }
 
-func allFieldsClusterVersionObj(needCreate bool) *appsv1alpha1.ClusterVersion {
-	clusterVersionObj := testapps.NewClusterVersionFactory(clusterVersionName, clusterDefName).
-		AddComponentVersion(mysqlCompDefName).
-		AddContainerShort("mysql", testapps.ApeCloudMySQLImage).
-		GetObject()
-	if needCreate {
-		Expect(testCtx.CreateObj(testCtx.Ctx, clusterVersionObj)).Should(Succeed())
-	}
-	return clusterVersionObj
-}
-
-func newAllFieldsClusterObj(
-	clusterDefObj *appsv1alpha1.ClusterDefinition,
-	clusterVersionObj *appsv1alpha1.ClusterVersion,
-	needCreate bool,
-) (*appsv1alpha1.Cluster, *appsv1alpha1.ClusterDefinition, *appsv1alpha1.ClusterVersion, types.NamespacedName) {
-	// setup Cluster obj requires default ClusterDefinition and ClusterVersion objects
-	if clusterDefObj == nil {
-		clusterDefObj = allFieldsClusterDefObj(needCreate)
-	}
-	if clusterVersionObj == nil {
-		clusterVersionObj = allFieldsClusterVersionObj(needCreate)
+func newAllFieldsClusterObj(compDef *appsv1.ComponentDefinition, create bool) (*appsv1.Cluster, *appsv1.ComponentDefinition, types.NamespacedName) {
+	// setup Cluster obj requires default ComponentDefinition object
+	if compDef == nil {
+		compDef = allFieldsCompDefObj(create)
 	}
 	pvcSpec := testapps.NewPVCSpec("1Gi")
-	clusterObj := testapps.NewClusterFactory(testCtx.DefaultNamespace, clusterName,
-		clusterDefObj.Name, clusterVersionObj.Name).
-		AddComponent(mysqlCompName, mysqlCompDefName).SetReplicas(1).
+	clusterObj := testapps.NewClusterFactory(testCtx.DefaultNamespace, clusterName, "").
+		AddComponent(mysqlCompName, compDef.Name).
+		SetReplicas(1).
 		AddVolumeClaimTemplate(testapps.DataVolumeName, pvcSpec).
 		AddComponentService(testapps.ServiceVPCName, corev1.ServiceTypeLoadBalancer).
 		AddComponentService(testapps.ServiceInternetName, corev1.ServiceTypeLoadBalancer).
 		GetObject()
 	key := client.ObjectKeyFromObject(clusterObj)
-	if needCreate {
+	if create {
 		Expect(testCtx.CreateObj(testCtx.Ctx, clusterObj)).Should(Succeed())
 	}
-	return clusterObj, clusterDefObj, clusterVersionObj, key
+	return clusterObj, compDef, key
 }
 
-func newAllFieldsComponent(clusterDef *appsv1alpha1.ClusterDefinition,
-	clusterVer *appsv1alpha1.ClusterVersion, cluster *appsv1alpha1.Cluster) *component.SynthesizedComponent {
-	reqCtx := intctrlutil.RequestCtx{
-		Ctx: testCtx.Ctx,
-		Log: logger,
+func newAllFieldsSynthesizedComponent(compDef *appsv1.ComponentDefinition, cluster *appsv1.Cluster) *component.SynthesizedComponent {
+	comp, err := component.BuildComponent(cluster, &cluster.Spec.ComponentSpecs[0], nil, nil)
+	if err != nil {
+		panic(fmt.Sprintf("build component object error: %v", err))
 	}
-	synthesizeComp, err := component.BuildSynthesizedComponentWrapper4Test(reqCtx, testCtx.Cli, clusterDef, clusterVer, cluster, &cluster.Spec.ComponentSpecs[0])
+	synthesizeComp, err := component.BuildSynthesizedComponent(testCtx.Ctx, testCtx.Cli, compDef, comp, cluster)
 	Expect(err).Should(Succeed())
 	Expect(synthesizeComp).ShouldNot(BeNil())
 	addTestVolumeMount(synthesizeComp.PodSpec, mysqlCompName)
+	if len(synthesizeComp.ConfigTemplates) > 0 {
+		configSpec := &synthesizeComp.ConfigTemplates[0]
+		configSpec.ReRenderResourceTypes = []appsv1.RerenderResourceType{appsv1.ComponentVScaleType, appsv1.ComponentHScaleType}
+	}
 	return synthesizeComp
+}
+
+func newAllFieldsComponent(cluster *appsv1.Cluster) *appsv1.Component {
+	comp, _ := component.BuildComponent(cluster, &cluster.Spec.ComponentSpecs[0], nil, nil)
+	return comp
 }
 
 func addTestVolumeMount(spec *corev1.PodSpec, containerName string) {

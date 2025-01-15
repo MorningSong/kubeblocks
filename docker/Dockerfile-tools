@@ -11,7 +11,7 @@
 #TARGETARCH - Architecture from --platform, e.g. arm64
 #TARGETVARIANT - used to set target ARM variant, e.g. v7
 
-ARG GO_VERSION=1.21
+ARG GO_VERSION=1.21-alpine
 
 FROM --platform=${BUILDPLATFORM} golang:${GO_VERSION} as builder
 ARG TARGETOS
@@ -38,7 +38,6 @@ COPY go.sum go.sum
 #COPY pkg/ pkg/
 #COPY controllers/ controllers/
 #COPY cmd/reloader/ cmd/reloader/
-#COPY cmd/lorry/ cmd/lorry/
 #COPY externalapis/ externalapis/
 #COPY version/ version/
 #COPY cmd/cli/ cmd/cli/
@@ -62,50 +61,24 @@ RUN --mount=type=bind,target=. \
 RUN --mount=type=bind,target=. \
     --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
-    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="${LD_FLAGS}" -a -o /out/config_render cmd/reloader/template/*.go
-
-RUN --mount=type=bind,target=. \
-    --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/go/pkg/mod \
-    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="${LD_FLAGS}" -a -o /out/lorry cmd/lorry/main.go
-
-RUN --mount=type=bind,target=. \
-    --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/go/pkg/mod \
-    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="${LD_FLAGS}" -a -o /out/lorryctl cmd/lorry/ctl/main.go
-
-
-RUN GRPC_HEALTH_PROBE_VERSION=v0.4.13  GOOS=${TARGETOS} GOARCH=${TARGETARCH} &&  \
-    wget -qO/bin/grpc_health_probe https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/${GRPC_HEALTH_PROBE_VERSION}/grpc_health_probe-${GOOS}-${GOARCH}
-
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="${LD_FLAGS}" -a -o /out/kbagent cmd/kbagent/main.go
 
 # Use alpine with tag 20230329 is corresponding to "edge" tag (latest release to date is 3.18) as of 20230625
-FROM docker.io/alpine:edge as dist
+FROM docker.io/alpine:3.19.1 as dist
 ARG APK_MIRROR
 
 # install tools via apk
 ENV APK_MIRROR=${APK_MIRROR}
 RUN if [ -n "${APK_MIRROR}" ]; then sed -i "s/dl-cdn.alpinelinux.org/${APK_MIRROR}/g" /etc/apk/repositories; fi
-RUN apk add --no-cache curl kubectl helm jq --allow-untrusted \
+RUN apk add --no-cache kubectl helm jq --allow-untrusted \
     && rm -rf /var/cache/apk/*
 
 # copy kubeblocks tools
-COPY config/lorry config/lorry
+COPY config/crd/bases /kubeblocks/crd
 COPY --from=builder /out/killer /bin
 COPY --from=builder /out/reloader /bin
-COPY --from=builder /out/config_render /bin
-COPY --from=builder /out/lorry /bin
-COPY --from=builder /out/lorryctl /bin
-COPY --from=builder /bin/grpc_health_probe /bin
-
-# make breaking change compatible
-RUN ln -s /bin/lorry /bin/probe
-RUN ln -s /config/lorry /config/probe
-
-# enable grpc_health_probe binary
-RUN chmod +x /bin/grpc_health_probe
+COPY --from=builder /out/kbagent /bin
 
 # mkdir kbcli config dir and helm cache dir.
 RUN mkdir /.cache && chown -R 65532:65532 /.cache
 USER 65532:65532
-

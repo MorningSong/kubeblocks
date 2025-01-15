@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -52,7 +52,6 @@ const (
 	PATCH  = Action("PATCH")
 	DELETE = Action("DELETE")
 	STATUS = Action("STATUS")
-	NOOP   = Action("NOOP")
 )
 
 type GVKNObjKey struct {
@@ -67,18 +66,31 @@ type GVKNObjKey struct {
 // the root vertex(i.e. the cluster vertex) will be treated specially:
 // as all its meta, spec and status can be updated in one reconciliation loop
 type ObjectVertex struct {
-	Obj    client.Object
-	OriObj client.Object
-	Action *Action
+	Obj               client.Object
+	OriObj            client.Object
+	Action            *Action
+	ClientOpt         any
+	PropagationPolicy client.PropagationPolicy
 }
 
 func (v *ObjectVertex) String() string {
 	if v.Action == nil {
-		return fmt.Sprintf("{obj:%T, name: %s, action: nil}",
-			v.Obj, v.Obj.GetName())
+		return fmt.Sprintf("{obj:%T, name: %s, action: nil}", v.Obj, v.Obj.GetName())
 	}
-	return fmt.Sprintf("{obj:%T, name: %s, action: %v}",
-		v.Obj, v.Obj.GetName(), *v.Action)
+	return fmt.Sprintf("{obj:%T, name: %s, action: %v}", v.Obj, v.Obj.GetName(), *v.Action)
+}
+
+func NewObjectVertex(oldObj, newObj client.Object, action *Action, opts ...GraphOption) *ObjectVertex {
+	graphOpts := &GraphOptions{}
+	for _, opt := range opts {
+		opt.ApplyTo(graphOpts)
+	}
+	return &ObjectVertex{
+		Obj:       newObj,
+		OriObj:    oldObj,
+		Action:    action,
+		ClientOpt: graphOpts.clientOpt,
+	}
 }
 
 type ObjectSnapshot map[GVKNObjKey]client.Object

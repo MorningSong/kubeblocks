@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -22,6 +22,7 @@ package restore
 import (
 	"fmt"
 	"strconv"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -35,6 +36,8 @@ import (
 	dpv1alpha1 "github.com/apecloud/kubeblocks/apis/dataprotection/v1alpha1"
 	"github.com/apecloud/kubeblocks/pkg/constant"
 	intctrlutil "github.com/apecloud/kubeblocks/pkg/controllerutil"
+	dptypes "github.com/apecloud/kubeblocks/pkg/dataprotection/types"
+	"github.com/apecloud/kubeblocks/pkg/dataprotection/utils"
 	"github.com/apecloud/kubeblocks/pkg/generics"
 	"github.com/apecloud/kubeblocks/pkg/testutil"
 	testapps "github.com/apecloud/kubeblocks/pkg/testutil/apps"
@@ -103,17 +106,26 @@ var _ = Describe("Backup Deleter Test", func() {
 					backupMethodName = testdp.VSBackupMethodName
 				}
 				Expect(testapps.ChangeObjStatus(testCtx, backup, func() {
+					endTime, _ := time.Parse(time.RFC3339, "2023-01-01T10:00:00Z")
 					backup.Status.Phase = dpv1alpha1.BackupPhaseCompleted
 					backup.Status.PersistentVolumeClaimName = backupPVCName
+					testdp.MockBackupStatusTarget(backup, dpv1alpha1.PodSelectionStrategyAny)
+					if useVolumeSnapshotBackup {
+						testdp.MockBackupVSStatusActions(backup)
+					}
+					backup.Status.TimeRange = &dpv1alpha1.BackupTimeRange{
+						TimeZone: "+08:00",
+						End:      &metav1.Time{Time: endTime},
+					}
 					testdp.MockBackupStatusMethod(backup, backupMethodName, testdp.DataVolumeName, actionSetName)
 				})).Should(Succeed())
 			}
 			return backup
 		}
 
-		initResources := func(reqCtx intctrlutil.RequestCtx, startingIndex int, useVolumeSnapshotBackup bool, change func(f *testdp.MockRestoreFactory)) (*RestoreManager, *BackupActionSet) {
+		initResources := func(reqCtx intctrlutil.RequestCtx, _ int, useVolumeSnapshot bool, change func(f *testdp.MockRestoreFactory)) (*RestoreManager, *BackupActionSet) {
 			By("create a completed backup")
-			backup := mockBackupForRestore(&testCtx, actionSet.Name, testdp.BackupPVCName, true, false)
+			backup := mockBackupForRestore(&testCtx, actionSet.Name, testdp.BackupPVCName, true, useVolumeSnapshot)
 
 			schedulingSpec := dpv1alpha1.SchedulingSpec{
 				NodeName: nodeName,
@@ -187,7 +199,8 @@ var _ = Describe("Backup Deleter Test", func() {
 			})
 
 			By("test RestorePVCFromSnapshot function")
-			Expect(restoreMGR.RestorePVCFromSnapshot(reqCtx, k8sClient, *backupSet)).Should(Succeed())
+			target := utils.GetBackupStatusTarget(backupSet.Backup, restoreMGR.Restore.Spec.Backup.SourceTargetName)
+			Expect(restoreMGR.RestorePVCFromSnapshot(reqCtx, k8sClient, *backupSet, target)).Should(Succeed())
 
 			checkPVC(startingIndex, useVolumeSnapshot)
 		})
@@ -204,7 +217,8 @@ var _ = Describe("Backup Deleter Test", func() {
 
 			By(fmt.Sprintf("test BuildPrepareDataJobs function, expect for %d jobs", replicas))
 			actionSetName := "preparedata-0"
-			jobs, err := restoreMGR.BuildPrepareDataJobs(reqCtx, k8sClient, *backupSet, actionSetName)
+			target := utils.GetBackupStatusTarget(backupSet.Backup, restoreMGR.Restore.Spec.Backup.SourceTargetName)
+			jobs, err := restoreMGR.BuildPrepareDataJobs(reqCtx, k8sClient, *backupSet, target, actionSetName)
 			Expect(err).ShouldNot(HaveOccurred())
 			// job contains the pvc's label
 			Expect(jobs[0].Spec.Template.Labels[constant.AppInstanceLabelKey]).Should(Equal(instanceName))
@@ -227,7 +241,8 @@ var _ = Describe("Backup Deleter Test", func() {
 			actionSetName := "preparedata-0"
 			testSerialCreateJob := func(expectRestoreFinished bool) {
 				By("test BuildPrepareDataJobs function, expect for 1 job")
-				jobs, err := restoreMGR.BuildPrepareDataJobs(reqCtx, k8sClient, *backupSet, actionSetName)
+				target := utils.GetBackupStatusTarget(backupSet.Backup, restoreMGR.Restore.Spec.Backup.SourceTargetName)
+				jobs, err := restoreMGR.BuildPrepareDataJobs(reqCtx, k8sClient, *backupSet, target, actionSetName)
 				Expect(err).ShouldNot(HaveOccurred())
 				Expect(len(jobs)).Should(Equal(1))
 
@@ -282,16 +297,17 @@ var _ = Describe("Backup Deleter Test", func() {
 					Name: "test-populate-pvc",
 				},
 			}
-			job, err := restoreMGR.BuildVolumePopulateJob(reqCtx, k8sClient, *backupSet, populatePVC, 0)
+			target := utils.GetBackupStatusTarget(backupSet.Backup, restoreMGR.Restore.Spec.Backup.SourceTargetName)
+			job, err := restoreMGR.BuildVolumePopulateJob(reqCtx, k8sClient, *backupSet, target, populatePVC, 0)
 			Expect(err).ShouldNot(HaveOccurred())
 			Expect(job).ShouldNot(BeNil())
 		})
 
 		testPostReady := func(existVolume bool) {
 			kbNamespace := "kb-system"
-			kbServiceAccountName := "kubeblocks"
+			execWorkerServiceAccountName := "dp-exec-worker"
 			viper.Set(constant.CfgKeyCtrlrMgrNS, kbNamespace)
-			viper.Set(constant.KBServiceAccountName, kbServiceAccountName)
+			viper.Set(dptypes.CfgKeyExecWorkerServiceAccountName, execWorkerServiceAccountName)
 			reqCtx := getReqCtx()
 			matchLabels := map[string]string{
 				constant.AppInstanceLabelKey: testdp.ClusterName,
@@ -304,21 +320,30 @@ var _ = Describe("Backup Deleter Test", func() {
 			testdp.NewFakeCluster(&testCtx)
 
 			By("test with execAction and expect for creating 2 exec job")
+			target := utils.GetBackupStatusTarget(backupSet.Backup, restoreMGR.Restore.Spec.Backup.SourceTargetName)
 			// step 0 is the execAction in actionSet
-			jobs, err := restoreMGR.BuildPostReadyActionJobs(reqCtx, k8sClient, *backupSet, 0)
+			jobs, err := restoreMGR.BuildPostReadyActionJobs(reqCtx, k8sClient, *backupSet, target, 0)
 			Expect(err).ShouldNot(HaveOccurred())
 			// the count of exec jobs should equal to the pods count of cluster
 			Expect(len(jobs)).Should(Equal(2))
 			Expect(jobs[0].Namespace).Should(Equal(kbNamespace))
-			Expect(jobs[0].Spec.Template.Spec.ServiceAccountName).Should(Equal(kbServiceAccountName))
+			Expect(jobs[0].Spec.Template.Spec.ServiceAccountName).Should(Equal(execWorkerServiceAccountName))
 
 			By("test with jobAction and expect for creating 1 job")
 			// step 0 is the execAction in actionSet
-			jobs, err = restoreMGR.BuildPostReadyActionJobs(reqCtx, k8sClient, *backupSet, 1)
+			jobs, err = restoreMGR.BuildPostReadyActionJobs(reqCtx, k8sClient, *backupSet, target, 1)
 			Expect(err).ShouldNot(HaveOccurred())
 			// count of job should equal to 1
 			Expect(len(jobs)).Should(Equal(1))
-
+			// test timeZone transform
+			var backupStopTimeEnv string
+			for _, v := range jobs[0].Spec.Template.Spec.Containers[0].Env {
+				if v.Name == dptypes.DPBackupStopTime {
+					backupStopTimeEnv = v.Value
+					break
+				}
+			}
+			Expect(backupStopTimeEnv).Should(Equal("2023-01-01 18:00:00"))
 			checkVolumes(jobs[0], testdp.DataVolumeName, existVolume)
 		}
 

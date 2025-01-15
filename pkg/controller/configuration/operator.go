@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -23,51 +23,51 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
+	appsv1 "github.com/apecloud/kubeblocks/apis/apps/v1"
 	"github.com/apecloud/kubeblocks/pkg/controller/component"
-	intctrlutil "github.com/apecloud/kubeblocks/pkg/controllerutil"
+	"github.com/apecloud/kubeblocks/pkg/controller/render"
 )
 
 type configOperator struct {
-	ReconcileCtx
+	render.ReconcileCtx
 }
 
-func NewConfigReconcileTask(resourceCtx *intctrlutil.ResourceCtx,
-	cluster *appsv1alpha1.Cluster,
-	component *component.SynthesizedComponent,
+func NewConfigReconcileTask(resourceCtx *render.ResourceCtx,
+	cluster *appsv1.Cluster,
+	component *appsv1.Component,
+	synthesizedComponent *component.SynthesizedComponent,
 	podSpec *corev1.PodSpec,
 	localObjs []client.Object,
 ) *configOperator {
 	return &configOperator{
-		ReconcileCtx{
-			ResourceCtx: resourceCtx,
-			Cluster:     cluster,
-			Component:   component,
-			PodSpec:     podSpec,
-			Cache:       localObjs,
+		render.ReconcileCtx{
+			ResourceCtx:          resourceCtx,
+			Cluster:              cluster,
+			Component:            component,
+			SynthesizedComponent: synthesizedComponent,
+			PodSpec:              podSpec,
+			Cache:                localObjs,
 		},
 	}
 }
 
 func (c *configOperator) Reconcile() error {
-	var component = c.Component
+	var synthesizedComponent = c.SynthesizedComponent
 
-	// Need to Merge configTemplateRef of ClusterVersion.Components[*].ConfigTemplateRefs and
-	// ClusterDefinition.Components[*].ConfigTemplateRefs
-	if len(component.ConfigTemplates) == 0 && len(component.ScriptTemplates) == 0 {
+	if len(synthesizedComponent.ConfigTemplates) == 0 && len(synthesizedComponent.ScriptTemplates) == 0 {
 		return c.UpdateConfiguration()
 	}
 
 	return NewCreatePipeline(c.ReconcileCtx).
 		Prepare().
-		RenderScriptTemplate().
-		UpdateConfiguration(). // reconcile Configuration
-		Configuration().       // sync Configuration
-		CreateConfigTemplate().
-		UpdatePodVolumes().
-		BuildConfigManagerSidecar().
-		UpdateConfigRelatedObject().
-		UpdateConfigurationStatus().
+		RenderScriptTemplate().      // render scriptTemplate into ConfigMap
+		UpdateConfiguration().       // create or update Configuration
+		Configuration().             // fetch the latest Configuration
+		CreateConfigTemplate().      // render configTemplate into ConfigMap (only for the first time)
+		UpdatePodVolumes().          // update podSpec.Volumes
+		BuildConfigManagerSidecar(). // build configManager sidecar and update podSpec.Containers and podSpec.InitContainers
+		UpdateConfigRelatedObject(). // handle InjectEnvTo, and create or update ConfigMaps
+		UpdateConfigurationStatus(). // update ConfigurationItemStatus revision and phase etc.
 		Complete()
 }
 

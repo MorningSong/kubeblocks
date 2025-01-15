@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -39,10 +39,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
 	dpv1alpha1 "github.com/apecloud/kubeblocks/apis/dataprotection/v1alpha1"
-	ctrlutil "github.com/apecloud/kubeblocks/pkg/controllerutil"
 	"github.com/apecloud/kubeblocks/pkg/dataprotection/action"
 	"github.com/apecloud/kubeblocks/pkg/testutil"
 	viper "github.com/apecloud/kubeblocks/pkg/viperx"
@@ -61,8 +60,8 @@ var (
 	logger    logr.Logger
 	recorder  record.EventRecorder
 
-	buildActionCtx = func() action.Context {
-		return action.Context{
+	buildActionCtx = func() action.ActionContext {
+		return action.ActionContext{
 			Ctx:              testCtx.Ctx,
 			Client:           testCtx.Cli,
 			Recorder:         recorder,
@@ -111,9 +110,6 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	Expect(cfg).NotTo(BeNil())
 
-	err = appsv1alpha1.AddToScheme(scheme.Scheme)
-	Expect(err).NotTo(HaveOccurred())
-
 	err = vsv1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 
@@ -128,9 +124,8 @@ var _ = BeforeSuite(func() {
 
 	// run reconcile
 	k8sManager, err := ctrl.NewManager(cfg, ctrl.Options{
-		Scheme:                scheme.Scheme,
-		MetricsBindAddress:    "0",
-		ClientDisableCacheFor: ctrlutil.GetUncachedObjects(),
+		Scheme:  scheme.Scheme,
+		Metrics: server.Options{BindAddress: "0"},
 	})
 	Expect(err).ToNot(HaveOccurred())
 

@@ -1,5 +1,5 @@
 #
-#Copyright (C) 2022-2023 ApeCloud Co., Ltd
+#Copyright (C) 2022-2024 ApeCloud Co., Ltd
 #
 #This file is part of KubeBlocks project
 #
@@ -37,24 +37,6 @@ reloader: test-go-generate build-checks ## Build reloader related binaries
 clean-reloader: ## Clean bin/reloader.
 	rm -f bin/reloader
 
-## config_render cmd
-
-CONFIG_RENDER_TOOL_LD_FLAGS = "-s -w"
-
-bin/config_render.%: ## Cross build bin/config_render.$(OS).$(ARCH) .
-	GOOS=$(word 2,$(subst ., ,$@)) GOARCH=$(word 3,$(subst ., ,$@)) $(GO) build -ldflags=${CONFIG_RENDER_TOOL_LD_FLAGS} -o $@ ./cmd/reloader/template/*.go
-
-.PHONY: config_render
-config_render: OS=$(shell $(GO) env GOOS)
-config_render: ARCH=$(shell $(GO) env GOARCH)
-config_render: build-checks ## Build config_render related binaries
-	$(MAKE) bin/config_render.${OS}.${ARCH}
-	mv bin/config_render.${OS}.${ARCH} bin/config_render
-
-.PHONY: clean-config_render
-clean-config_render: ## Clean bin/tpltool.
-	rm -f bin/config_render
-
 ## cue-helper cmd
 
 CUE_HELPER_LD_FLAGS = "-s -w"
@@ -72,28 +54,3 @@ cue-helper: test-go-generate build-checks ## Build cue-helper related binaries
 .PHONY: clean-cue-helper
 clean-cue-helper: ## Clean bin/cue-helper.
 	rm -f bin/cue-helper
-
-## lorry cmd
-
-LORRY_LD_FLAGS = "-s -w"
-
-bin/lorry.%: ## Cross build bin/lorry.$(OS).$(ARCH) .
-	GOOS=$(word 2,$(subst ., ,$@)) GOARCH=$(word 3,$(subst ., ,$@)) $(GO) build -ldflags=${LORRY_LD_FLAGS} -o $@  ./cmd/lorry/main.go
-
-.PHONY: lorry
-lorry: OS=$(shell $(GO) env GOOS)
-lorry: ARCH=$(shell $(GO) env GOARCH)
-lorry: test-go-generate build-checks ## Build lorry related binaries
-	$(MAKE) bin/lorry.${OS}.${ARCH}
-	mv bin/lorry.${OS}.${ARCH} bin/lorry
-
-.PHONY: lorry-fast
-lorry-fast: OS=$(shell $(GO) env GOOS)
-lorry-fast: ARCH=$(shell $(GO) env GOARCH)
-lorry-fast:
-	$(MAKE) bin/lorry.${OS}.${ARCH}
-	mv bin/lorry.${OS}.${ARCH} bin/lorry
-
-.PHONY: clean-lorry
-clean-lorry: ## Clean bin/lorry.
-	rm -f bin/lorry

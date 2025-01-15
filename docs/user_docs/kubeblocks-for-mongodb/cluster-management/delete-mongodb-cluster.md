@@ -19,32 +19,31 @@ The termination policy determines how a cluster is deleted. Set the policy when 
 
 :::
 
-| **terminationPolicy**  | **Deleting Operation**                    |
-|:--                     | :--                                       |
-| `DoNotTerminate`       | `DoNotTerminate` blocks delete operation. |
-| `Halt`                 | `Halt` deletes workload resources such as statefulset, deployment workloads but keep PVCs. |
-| `Delete`               | `Delete` deletes workload resources and PVCs but keep backups. |
-| `WipeOut`              | `WipeOut` deletes workload resources, PVCs and all relevant resources included backups. |
+| **terminationPolicy** | **Deleting Operation**                           |
+|:----------------------|:-------------------------------------------------|
+| `DoNotTerminate`      | `DoNotTerminate` prevents deletion of the Cluster. This policy ensures that all resources remain intact.       |
+| `Delete`              | `Delete` deletes Cluster resources like Pods, Services, and Persistent Volume Claims (PVCs), leading to a thorough cleanup while removing all persistent data.   |
+| `WipeOut`             | `WipeOut` is an aggressive policy that deletes all Cluster resources, including volume snapshots and backups in external storage. This results in complete data removal and should be used cautiously, primarily in non-production environments to avoid irreversible data loss.  |
 
 To check the termination policy, execute the following command.
 
 <Tabs>
 
-<TabItem value="kbcli" label="kbcli" default>
+<TabItem value="kubectl" label="kubectl" default>
 
 ```bash
-kbcli cluster list mongodb-cluster
+kubectl get cluster mycluster -n demo
+>
+NAME        CLUSTER-DEFINITION   VERSION       TERMINATION-POLICY   STATUS    AGE
+mycluster   mongodb              mongodb-5.0   Delete               Running   17m
 ```
 
 </TabItem>
 
-<TabItem value="kubectl" label="kubectl">
+<TabItem value="kbcli" label="kbcli">
 
 ```bash
-kubectl -n demo get cluster mongodb-cluster 
->
-NAME              CLUSTER-DEFINITION   VERSION          TERMINATION-POLICY   STATUS    AGE
-mongodb-cluster   mongodb              mongodb-5.0   Delete               Running   17m
+kbcli cluster list mycluster -n demo
 ```
 
 </TabItem>
@@ -57,22 +56,26 @@ Run the command below to delete a specified cluster.
 
 <Tabs>
 
-<TabItem value="kbcli" label="kbcli" default>
+<TabItem value="kubectl" label="kubectl" default>
 
 ```bash
-kbcli cluster delete mongodb-cluster
+kubectl delete -n demo cluster mycluster
+```
+
+If you want to delete a cluster and its all related resources, you can set the termination policy to `WipeOut`, and then delete the cluster.
+
+```bash
+kubectl patch -n demo cluster mycluster -p '{"spec":{"terminationPolicy":"WipeOut"}}' --type="merge"
+
+kubectl delete -n demo cluster mycluster
 ```
 
 </TabItem>
 
-<TabItem value="kubectl" label="kubectl">
-
-If you want to delete a cluster and its all related resources, you can modify the termination policy to `WipeOut`, then delete the cluster.
+<TabItem value="kbcli" label="kbcli">
 
 ```bash
-kubectl patch -n demo cluster mongodb-cluster -p '{"spec":{"terminationPolicy":"WipeOut"}}' --type="merge"
-
-kubectl delete -n demo cluster mongodb-cluster
+kbcli cluster delete mycluster -n demo
 ```
 
 </TabItem>

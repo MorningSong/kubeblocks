@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -44,7 +44,7 @@ const (
 func GenerateOpenAPISchema(cueTpl string, schemaType string) (*apiextv1.JSONSchemaProps, error) {
 	const (
 		rootPath       = "root"
-		openAPIVersion = "3.1.0"
+		openAPIVersion = "3.0.0"
 	)
 
 	rt, err := NewRuntime(cueTpl)

@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -23,9 +23,10 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/golang/mock/gomock"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -250,7 +251,7 @@ mathAvg = [8-9][0-9]\.?\d*`
 
 		It("KB2 syntax", func() {
 			engine := NewTplEngine(&TplValues{}, nil, "for_test", nil, ctx, WithCustomizedWithType(KBDSL2))
-			r, err := engine.Render(KBDSL2BeginDelim + ` camelcase "get_user_name" ` + KBDSL2EndDelim)
+			r, err := engine.Render(KBDSL2BeginDelim + ` camelcase "get_user_name" ` + KBDSL2EndDelim) //nolint:goconst
 			Expect(err).Should(Succeed())
 			Expect("GetUserName").Should(BeEquivalentTo(r))
 		})

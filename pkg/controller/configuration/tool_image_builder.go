@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -20,87 +20,110 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 package configuration
 
 import (
+	"path/filepath"
+
 	corev1 "k8s.io/api/core/v1"
 
-	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
+	appsv1beta1 "github.com/apecloud/kubeblocks/apis/apps/v1beta1"
 	cfgcm "github.com/apecloud/kubeblocks/pkg/configuration/config_manager"
 	"github.com/apecloud/kubeblocks/pkg/constant"
-	"github.com/apecloud/kubeblocks/pkg/controller/component"
 	"github.com/apecloud/kubeblocks/pkg/controller/factory"
 	intctrlutil "github.com/apecloud/kubeblocks/pkg/controllerutil"
+	"github.com/apecloud/kubeblocks/pkg/generics"
 	viper "github.com/apecloud/kubeblocks/pkg/viperx"
 )
 
 const (
-	toolsVolumeName                  = "kb-tools"
-	initSecRenderedToolContainerName = "init-secondary-rendered-tool"
-
-	tplRenderToolPath = "/bin/config_render"
+	toolsVolumeName                      = "kb-tools"
+	installConfigMangerToolContainerName = "install-config-manager-tool"
+	kbToolsImagePlaceHolder              = "$(KUBEBLOCKS_TOOLS_IMAGE)"
 )
 
-func buildConfigToolsContainer(cfgManagerParams *cfgcm.CfgManagerBuildParams, podSpec *corev1.PodSpec, comp *component.SynthesizedComponent) error {
+func buildReloadToolsContainer(cfgManagerParams *cfgcm.CfgManagerBuildParams, podSpec *corev1.PodSpec) error {
 	if len(cfgManagerParams.ConfigSpecsBuildParams) == 0 {
 		return nil
 	}
 
 	// construct config manager tools volume
-	toolContainers := make([]appsv1alpha1.ToolConfig, 0)
-	toolsMap := make(map[string]cfgcm.ConfigSpecMeta)
+	toolsImageMap := make(map[string]cfgcm.ConfigSpecMeta)
+
+	var toolsPath string
+	var sidecarImage string
+	var toolContainers []appsv1beta1.ToolConfig
 	for _, buildParam := range cfgManagerParams.ConfigSpecsBuildParams {
 		if buildParam.ToolsImageSpec == nil {
 			continue
 		}
-		for _, toolConfig := range buildParam.ToolsImageSpec.ToolConfigs {
-			if _, ok := toolsMap[toolConfig.Name]; !ok {
-				replaceToolsImageHolder(&toolConfig, podSpec, buildParam.ConfigSpec.VolumeName)
-				toolContainers = append(toolContainers, toolConfig)
-				toolsMap[toolConfig.Name] = buildParam
+		for _, toolImage := range buildParam.ToolsImageSpec.ToolConfigs {
+			if _, ok := toolsImageMap[toolImage.Name]; ok {
+				continue
+			}
+			toolsImageMap[toolImage.Name] = buildParam
+			replaceToolsImageHolder(&toolImage, podSpec, buildParam.ConfigSpec.VolumeName)
+			if toolImage.AsSidecarContainerImage() && sidecarImage == "" {
+				sidecarImage = toolImage.Image
+			} else {
+				toolContainers = append(toolContainers, toolImage)
 			}
 		}
 		buildToolsVolumeMount(cfgManagerParams, podSpec, buildParam.ConfigSpec.VolumeName, buildParam.ToolsImageSpec.MountPoint)
 	}
 
 	// Ensure that the order in which iniContainers are generated does not change
-	toolContainers = checkAndInstallToolsImageVolume(toolContainers, cfgManagerParams.ConfigSpecsBuildParams)
+	toolContainers, toolsPath = checkAndInstallToolsImageVolume(toolContainers, cfgManagerParams.ConfigSpecsBuildParams, sidecarImage == "")
 	if len(toolContainers) == 0 {
 		return nil
 	}
-
-	containers, err := factory.BuildCfgManagerToolsContainer(cfgManagerParams, comp, toolContainers, toolsMap)
+	if sidecarImage != "" {
+		cfgManagerParams.Image = sidecarImage
+	}
+	if toolsPath != "" {
+		cfgManagerParams.ConfigManagerReloadPath = toolsPath
+	}
+	containers, err := factory.BuildCfgManagerToolsContainer(cfgManagerParams, toolContainers, toolsImageMap)
 	if err == nil {
 		cfgManagerParams.ToolsContainers = containers
 	}
 	return err
 }
 
-func checkAndInstallToolsImageVolume(toolContainers []appsv1alpha1.ToolConfig, buildParams []cfgcm.ConfigSpecMeta) []appsv1alpha1.ToolConfig {
+func checkAndInstallToolsImageVolume(toolContainers []appsv1beta1.ToolConfig, buildParams []cfgcm.ConfigSpecMeta, useBuiltinSidecarImage bool) ([]appsv1beta1.ToolConfig, string) {
+	var configManagerBinaryPath string
 	for _, buildParam := range buildParams {
-		if buildParam.ToolsImageSpec != nil && buildParam.ConfigSpec.LegacyRenderedConfigSpec != nil {
-			// auto install config_render tool
-			toolContainers = checkAndCreateRenderedInitContainer(toolContainers, buildParam.ToolsImageSpec.MountPoint)
+		if buildParam.ToolsImageSpec == nil {
+			continue
+		}
+		if !useBuiltinSidecarImage {
+			toolContainers = checkAndCreateConfigManagerToolsContainer(toolContainers, buildParam.ToolsImageSpec.MountPoint)
+			configManagerBinaryPath = filepath.Join(buildParam.ToolsImageSpec.MountPoint, filepath.Base(constant.ConfigManagerToolPath))
 		}
 	}
-	return toolContainers
+	return toolContainers, configManagerBinaryPath
 }
 
-func checkAndCreateRenderedInitContainer(toolContainers []appsv1alpha1.ToolConfig, mountPoint string) []appsv1alpha1.ToolConfig {
-	kbToolsImage := viper.GetString(constant.KBToolsImage)
-	for _, container := range toolContainers {
-		if container.Name == initSecRenderedToolContainerName {
-			return nil
-		}
+func containerExists(containers []appsv1beta1.ToolConfig, containerName string) bool {
+	return generics.CountFunc(containers, func(container appsv1beta1.ToolConfig) bool {
+		return container.Name == containerName
+	}) != 0
+}
+
+func checkAndCreateConfigManagerToolsContainer(toolContainers []appsv1beta1.ToolConfig, mountPoint string) []appsv1beta1.ToolConfig {
+	if containerExists(toolContainers, installConfigMangerToolContainerName) {
+		return toolContainers
 	}
-	toolContainers = append(toolContainers, appsv1alpha1.ToolConfig{
-		Name:    initSecRenderedToolContainerName,
+
+	kbToolsImage := viper.GetString(constant.KBToolsImage)
+	toolContainers = append(toolContainers, appsv1beta1.ToolConfig{
+		Name:    installConfigMangerToolContainerName,
 		Image:   kbToolsImage,
-		Command: []string{"cp", tplRenderToolPath, mountPoint},
+		Command: []string{"cp", constant.ConfigManagerToolPath, mountPoint},
 	})
 	return toolContainers
 }
 
-func replaceToolsImageHolder(toolConfig *appsv1alpha1.ToolConfig, podSpec *corev1.PodSpec, volumeName string) {
+func replaceToolsImageHolder(toolConfig *appsv1beta1.ToolConfig, podSpec *corev1.PodSpec, volumeName string) {
 	switch {
-	case toolConfig.Image == constant.KBToolsImagePlaceHolder:
+	case toolConfig.Image == kbToolsImagePlaceHolder:
 		toolConfig.Image = viper.GetString(constant.KBToolsImage)
 	case toolConfig.Image == "":
 		usingContainers := intctrlutil.GetPodContainerWithVolumeMount(podSpec, volumeName)

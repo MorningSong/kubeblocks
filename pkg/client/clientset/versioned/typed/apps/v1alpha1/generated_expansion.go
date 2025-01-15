@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,26 +18,16 @@ limitations under the License.
 
 package v1alpha1
 
-type BackupPolicyTemplateExpansion interface{}
-
 type ClusterExpansion interface{}
 
 type ClusterDefinitionExpansion interface{}
 
-type ClusterVersionExpansion interface{}
-
 type ComponentExpansion interface{}
-
-type ComponentClassDefinitionExpansion interface{}
 
 type ComponentDefinitionExpansion interface{}
 
-type ComponentResourceConstraintExpansion interface{}
+type ComponentVersionExpansion interface{}
 
 type ConfigConstraintExpansion interface{}
-
-type OpsDefinitionExpansion interface{}
-
-type OpsRequestExpansion interface{}
 
 type ServiceDescriptorExpansion interface{}

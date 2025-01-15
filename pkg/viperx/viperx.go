@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -47,6 +47,10 @@ func GetInt(key string) int {
 	return rCall(key, viper.GetInt)
 }
 
+func GetFloat64(key string) float64 {
+	return rCall(key, viper.GetFloat64)
+}
+
 func GetInt32(key string) int32 {
 	return rCall(key, viper.GetInt32)
 }
@@ -61,6 +65,18 @@ func GetStringSlice(key string) []string {
 
 func GetDuration(key string) time.Duration {
 	return rCall(key, viper.GetDuration)
+}
+
+func Unmarshal(rawVal interface{}, opts ...viper.DecoderConfigOption) error {
+	lock.RLock()
+	defer lock.RUnlock()
+	return viper.Unmarshal(rawVal, opts...)
+}
+
+func UnmarshalKey(key string, rawVal interface{}, opts ...viper.DecoderConfigOption) error {
+	lock.RLock()
+	defer lock.RUnlock()
+	return viper.UnmarshalKey(key, rawVal, opts...)
 }
 
 func AllSettings() map[string]interface{} {

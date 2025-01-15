@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -32,12 +32,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	appsv1 "github.com/apecloud/kubeblocks/apis/apps/v1"
 	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
 	dpv1alpha1 "github.com/apecloud/kubeblocks/apis/dataprotection/v1alpha1"
 	"github.com/apecloud/kubeblocks/pkg/constant"
 	"github.com/apecloud/kubeblocks/pkg/controller/component"
 	"github.com/apecloud/kubeblocks/pkg/controller/factory"
+	"github.com/apecloud/kubeblocks/pkg/controller/instanceset"
 	intctrlutil "github.com/apecloud/kubeblocks/pkg/controllerutil"
+	dputils "github.com/apecloud/kubeblocks/pkg/dataprotection/utils"
 )
 
 // RestoreManager restores manager functions
@@ -46,21 +49,24 @@ import (
 type RestoreManager struct {
 	client.Client
 	Ctx     context.Context
-	Cluster *appsv1alpha1.Cluster
+	Cluster *appsv1.Cluster
 	Scheme  *k8sruntime.Scheme
 
 	// private
-	namespace           string
-	restoreTime         string
-	volumeRestorePolicy dpv1alpha1.VolumeClaimRestorePolicy
-	startingIndex       int32
-	replicas            int32
-	restoreLabels       map[string]string
+	namespace                         string
+	restoreTime                       string
+	env                               []corev1.EnvVar
+	parameters                        []dpv1alpha1.ParameterPair
+	volumeRestorePolicy               dpv1alpha1.VolumeClaimRestorePolicy
+	doReadyRestoreAfterClusterRunning bool
+	startingIndex                     int32
+	replicas                          int32
+	restoreLabels                     map[string]string
 }
 
 func NewRestoreManager(ctx context.Context,
 	cli client.Client,
-	cluster *appsv1alpha1.Cluster,
+	cluster *appsv1.Cluster,
 	scheme *k8sruntime.Scheme,
 	restoreLabels map[string]string,
 	replicas, startingIndex int32,
@@ -78,8 +84,8 @@ func NewRestoreManager(ctx context.Context,
 	}
 }
 
-func (r *RestoreManager) DoRestore(comp *component.SynthesizedComponent) error {
-	backupObj, err := r.initFromAnnotation(comp)
+func (r *RestoreManager) DoRestore(comp *component.SynthesizedComponent, compObj *appsv1.Component, postProvisionDone bool) error {
+	backupObj, err := r.initFromAnnotation(comp, compObj)
 	if err != nil {
 		return err
 	}
@@ -89,28 +95,67 @@ func (r *RestoreManager) DoRestore(comp *component.SynthesizedComponent) error {
 	if backupObj.Status.BackupMethod == nil {
 		return intctrlutil.NewErrorf(intctrlutil.ErrorTypeRestoreFailed, `status.backupMethod of backup "%s" can not be empty`, backupObj.Name)
 	}
-	if err = r.DoPrepareData(comp, backupObj); err != nil {
+	if err = r.DoPrepareData(comp, compObj, backupObj); err != nil {
 		return err
 	}
-	if err = r.DoPostReady(comp, backupObj); err != nil {
+	if compObj.Status.Phase != appsv1.RunningComponentPhase {
+		return nil
+	}
+	// wait for the post-provision action to complete.
+	if !postProvisionDone {
+		return nil
+	}
+	if r.doReadyRestoreAfterClusterRunning && r.Cluster.Status.Phase != appsv1.RunningClusterPhase {
+		return nil
+	}
+	if err = r.DoPostReady(comp, compObj, backupObj); err != nil {
 		return err
+	}
+	// mark component restore done
+	if compObj.Annotations != nil {
+		compObj.Annotations[constant.RestoreDoneAnnotationKey] = "true"
 	}
 	// do clean up
-	if err = r.cleanupClusterAnnotations(); err != nil {
-		return err
-	}
-	return r.cleanupRestores(comp)
+	return r.cleanupRestoreAnnotations(comp.Name)
 }
 
-func (r *RestoreManager) DoPrepareData(comp *component.SynthesizedComponent, backupObj *dpv1alpha1.Backup) error {
-	restore, err := r.BuildPrepareDataRestore(comp, backupObj)
-	if err != nil {
-		return err
+func (r *RestoreManager) DoPrepareData(comp *component.SynthesizedComponent,
+	compObj *appsv1.Component,
+	backupObj *dpv1alpha1.Backup) error {
+	replicas := func(t appsv1.InstanceTemplate) int32 {
+		if t.Replicas != nil {
+			return *t.Replicas
+		}
+		return 1 // default replica
 	}
-	return r.createRestoreAndWait(restore)
+	var restores []*dpv1alpha1.Restore
+	var templateReplicas int32
+	for _, v := range comp.Instances {
+		r.replicas = replicas(v)
+		templateReplicas += r.replicas
+		restore, err := r.BuildPrepareDataRestore(comp, backupObj, v.Name)
+		if err != nil {
+			return err
+		}
+		if restore != nil {
+			restores = append(restores, restore)
+		}
+	}
+	compReplicas := comp.Replicas - templateReplicas
+	if compReplicas > 0 {
+		r.replicas = compReplicas
+		restore, err := r.BuildPrepareDataRestore(comp, backupObj, "")
+		if err != nil {
+			return err
+		}
+		if restore != nil {
+			restores = append(restores, restore)
+		}
+	}
+	return r.createRestoreAndWait(compObj, restores...)
 }
 
-func (r *RestoreManager) BuildPrepareDataRestore(comp *component.SynthesizedComponent, backupObj *dpv1alpha1.Backup) (*dpv1alpha1.Restore, error) {
+func (r *RestoreManager) BuildPrepareDataRestore(comp *component.SynthesizedComponent, backupObj *dpv1alpha1.Backup, templateName string) (*dpv1alpha1.Restore, error) {
 	backupMethod := backupObj.Status.BackupMethod
 	if backupMethod == nil {
 		return nil, intctrlutil.NewErrorf(intctrlutil.ErrorTypeRestoreFailed, `status.backupMethod of backup "%s" can not be empty`, backupObj.Name)
@@ -119,35 +164,26 @@ func (r *RestoreManager) BuildPrepareDataRestore(comp *component.SynthesizedComp
 	if targetVolumes == nil {
 		return nil, nil
 	}
-	getClusterJSON := func() string {
-		clusterSpec := r.Cluster.DeepCopy()
-		clusterSpec.ObjectMeta = metav1.ObjectMeta{
-			Name: clusterSpec.GetName(),
-			UID:  clusterSpec.GetUID(),
-		}
-		clusterSpec.Status = appsv1alpha1.ClusterStatus{}
-		b, _ := json.Marshal(*clusterSpec)
-		return string(b)
-	}
 
 	var templates []dpv1alpha1.RestoreVolumeClaim
-	pvcLabels := constant.GetKBWellKnownLabels(comp.ClusterDefName, r.Cluster.Name, comp.Name)
+	pvcLabels := constant.GetCompLabels(r.Cluster.Name, comp.Name)
+	// TODO: create pvc by the volumeClaimTemplates of instance template if it is necessary.
 	for _, v := range comp.VolumeClaimTemplates {
-		if !r.existVolumeSource(targetVolumes, v.Name) {
+		if !dputils.ExistTargetVolume(targetVolumes, v.Name) {
 			continue
+		}
+		name := fmt.Sprintf("%s-%s-%s", v.Name, r.Cluster.Name, comp.Name)
+		if templateName != "" {
+			name += "-" + templateName
 		}
 		pvc := &corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:   fmt.Sprintf("%s-%s-%s", v.Name, r.Cluster.Name, comp.Name),
+				Name:   name,
 				Labels: pvcLabels,
-				Annotations: map[string]string{
-					// satisfy the detection of transformer_halt_recovering.
-					constant.LastAppliedClusterAnnotationKey: getClusterJSON(),
-				},
 			},
 		}
 		// build pvc labels
-		factory.BuildPersistentVolumeClaimLabels(comp, pvc, v.Name)
+		factory.BuildPersistentVolumeClaimLabels(comp, pvc, v.Name, templateName)
 		claimTemplate := dpv1alpha1.RestoreVolumeClaim{
 			ObjectMeta:      pvc.ObjectMeta,
 			VolumeClaimSpec: v.Spec,
@@ -160,21 +196,23 @@ func (r *RestoreManager) BuildPrepareDataRestore(comp *component.SynthesizedComp
 	if len(templates) == 0 {
 		return nil, nil
 	}
-	schedulingSpec, err := r.buildSchedulingSpec(comp)
-	if err != nil {
-		return nil, err
-	}
+	sourceTargetName := comp.Annotations[constant.BackupSourceTargetAnnotationKey]
+	sourceTarget := dputils.GetBackupStatusTarget(backupObj, sourceTargetName)
 	restore := &dpv1alpha1.Restore{
-		ObjectMeta: r.GetRestoreObjectMeta(comp, dpv1alpha1.PrepareData),
+		ObjectMeta: r.GetRestoreObjectMeta(comp, dpv1alpha1.PrepareData, templateName),
 		Spec: dpv1alpha1.RestoreSpec{
 			Backup: dpv1alpha1.BackupRef{
-				Name:      backupObj.Name,
-				Namespace: r.namespace,
+				Name:             backupObj.Name,
+				Namespace:        r.namespace,
+				SourceTargetName: sourceTargetName,
 			},
 			RestoreTime: r.restoreTime,
+			Env:         r.env,
+			Parameters:  r.parameters,
 			PrepareDataConfig: &dpv1alpha1.PrepareDataConfig{
-				SchedulingSpec:           schedulingSpec,
-				VolumeClaimRestorePolicy: r.volumeRestorePolicy,
+				RequiredPolicyForAllPodSelection: r.buildRequiredPolicy(sourceTarget),
+				SchedulingSpec:                   r.buildSchedulingSpec(comp),
+				VolumeClaimRestorePolicy:         r.volumeRestorePolicy,
 				RestoreVolumeClaimsTemplate: &dpv1alpha1.RestoreVolumeClaimsTemplate{
 					Replicas:      r.replicas,
 					StartingIndex: r.startingIndex,
@@ -186,69 +224,90 @@ func (r *RestoreManager) BuildPrepareDataRestore(comp *component.SynthesizedComp
 	return restore, nil
 }
 
-func (r *RestoreManager) DoPostReady(comp *component.SynthesizedComponent, backupObj *dpv1alpha1.Backup) error {
-	compStatus := r.Cluster.Status.Components[comp.Name]
-	if compStatus.Phase != appsv1alpha1.RunningClusterCompPhase {
-		return nil
+func (r *RestoreManager) DoPostReady(comp *component.SynthesizedComponent,
+	compObj *appsv1.Component,
+	backupObj *dpv1alpha1.Backup) error {
+	jobActionLabels := constant.GetCompLabels(r.Cluster.Name, comp.Name)
+	if len(comp.Roles) > 0 {
+		jobActionLabels[instanceset.AccessModeLabelKey] = string(appsv1alpha1.ReadWrite)
 	}
-	jobActionLabels := constant.GetKBWellKnownLabels(comp.ClusterDefName, r.Cluster.Name, comp.Name)
-	if comp.WorkloadType == appsv1alpha1.Consensus || comp.WorkloadType == appsv1alpha1.Replication {
-		// TODO: use rsm constant
-		rsmAccessModeLabelKey := "rsm.workloads.kubeblocks.io/access-mode"
-		jobActionLabels[rsmAccessModeLabelKey] = string(appsv1alpha1.ReadWrite)
-	}
-	// TODO: get connect credential from backupPolicyTemplate
+	sourceTargetName := compObj.Annotations[constant.BackupSourceTargetAnnotationKey]
 	restore := &dpv1alpha1.Restore{
-		ObjectMeta: r.GetRestoreObjectMeta(comp, dpv1alpha1.PostReady),
+		ObjectMeta: r.GetRestoreObjectMeta(comp, dpv1alpha1.PostReady, ""),
 		Spec: dpv1alpha1.RestoreSpec{
 			Backup: dpv1alpha1.BackupRef{
-				Name:      backupObj.Name,
-				Namespace: r.namespace,
+				Name:             backupObj.Name,
+				Namespace:        r.namespace,
+				SourceTargetName: sourceTargetName,
 			},
 			RestoreTime: r.restoreTime,
+			Env:         r.env,
+			Parameters:  r.parameters,
 			ReadyConfig: &dpv1alpha1.ReadyConfig{
 				ExecAction: &dpv1alpha1.ExecAction{
 					Target: dpv1alpha1.ExecActionTarget{
 						PodSelector: metav1.LabelSelector{
-							MatchLabels: constant.GetKBWellKnownLabels(comp.ClusterDefName, r.Cluster.Name, comp.Name),
+							MatchLabels: constant.GetCompLabels(r.Cluster.Name, comp.Name),
 						},
 					},
 				},
 				JobAction: &dpv1alpha1.JobAction{
 					Target: dpv1alpha1.JobActionTarget{
-						PodSelector: metav1.LabelSelector{
-							MatchLabels: jobActionLabels,
+						PodSelector: dpv1alpha1.PodSelector{
+							LabelSelector: &metav1.LabelSelector{
+								MatchLabels: jobActionLabels,
+							},
 						},
 					},
 				},
 			},
 		},
 	}
-	return r.createRestoreAndWait(restore)
+	sourceTarget := dputils.GetBackupStatusTarget(backupObj, sourceTargetName)
+	if sourceTarget != nil {
+		// TODO: input the pod selection strategy by user.
+		restore.Spec.ReadyConfig.JobAction.Target.PodSelector.Strategy = sourceTarget.PodSelector.Strategy
+	}
+	restore.Spec.ReadyConfig.JobAction.RequiredPolicyForAllPodSelection = r.buildRequiredPolicy(sourceTarget)
+	backupMethod := backupObj.Status.BackupMethod
+	if backupMethod.TargetVolumes != nil {
+		restore.Spec.ReadyConfig.JobAction.Target.VolumeMounts = backupMethod.TargetVolumes.VolumeMounts
+	}
+	return r.createRestoreAndWait(compObj, restore)
 }
 
-func (r *RestoreManager) buildSchedulingSpec(comp *component.SynthesizedComponent) (dpv1alpha1.SchedulingSpec, error) {
-	var err error
-	schedulingSpec := dpv1alpha1.SchedulingSpec{}
-	compSpec := r.Cluster.Spec.GetComponentByName(comp.Name)
-	affinity := component.BuildAffinity(r.Cluster, compSpec)
-	if schedulingSpec.Affinity, err = component.BuildPodAffinity(r.Cluster.Name, comp.Name, affinity); err != nil {
-		return schedulingSpec, err
+func (r *RestoreManager) buildRequiredPolicy(sourceTarget *dpv1alpha1.BackupStatusTarget) *dpv1alpha1.RequiredPolicyForAllPodSelection {
+	var requiredPolicy *dpv1alpha1.RequiredPolicyForAllPodSelection
+	if sourceTarget != nil && sourceTarget.PodSelector.Strategy == dpv1alpha1.PodSelectionStrategyAll {
+		// TODO: input the RequiredPolicyForAllPodSelection by user.
+		requiredPolicy = &dpv1alpha1.RequiredPolicyForAllPodSelection{
+			DataRestorePolicy: dpv1alpha1.OneToOneRestorePolicy,
+		}
 	}
-	schedulingSpec.TopologySpreadConstraints = component.BuildPodTopologySpreadConstraints(r.Cluster.Name, comp.Name, affinity)
-	if schedulingSpec.Tolerations, err = component.BuildTolerations(r.Cluster, compSpec); err != nil {
-		return schedulingSpec, err
-	}
-	return schedulingSpec, nil
+	return requiredPolicy
 }
 
-func (r *RestoreManager) GetRestoreObjectMeta(comp *component.SynthesizedComponent, stage dpv1alpha1.RestoreStage) metav1.ObjectMeta {
+func (r *RestoreManager) buildSchedulingSpec(comp *component.SynthesizedComponent) dpv1alpha1.SchedulingSpec {
+	if comp.PodSpec == nil {
+		return dpv1alpha1.SchedulingSpec{}
+	}
+	return dpv1alpha1.SchedulingSpec{
+		Affinity:                  comp.PodSpec.Affinity,
+		Tolerations:               comp.PodSpec.Tolerations,
+		TopologySpreadConstraints: comp.PodSpec.TopologySpreadConstraints,
+	}
+}
+
+func (r *RestoreManager) GetRestoreObjectMeta(comp *component.SynthesizedComponent, stage dpv1alpha1.RestoreStage, templateName string) metav1.ObjectMeta {
 	name := fmt.Sprintf("%s-%s-%s-%s", r.Cluster.Name, comp.Name, r.Cluster.UID[:8], strings.ToLower(string(stage)))
+	if templateName != "" {
+		name = fmt.Sprintf("%s-%s", name, templateName)
+	}
 	if r.startingIndex != 0 {
 		name = fmt.Sprintf("%s-%d", name, r.startingIndex)
 	}
 	if len(r.restoreLabels) == 0 {
-		r.restoreLabels = constant.GetKBWellKnownLabels(comp.ClusterDefName, r.Cluster.Name, comp.Name)
+		r.restoreLabels = constant.GetCompLabels(r.Cluster.Name, comp.Name)
 	}
 	return metav1.ObjectMeta{
 		Name:      name,
@@ -257,22 +316,7 @@ func (r *RestoreManager) GetRestoreObjectMeta(comp *component.SynthesizedCompone
 	}
 }
 
-// existVolumeSource checks if the backup.status.backupMethod.targetVolumes exists the target volume which should be restored.
-func (r *RestoreManager) existVolumeSource(targetVolumes *dpv1alpha1.TargetVolumeInfo, volumeName string) bool {
-	for _, v := range targetVolumes.Volumes {
-		if v == volumeName {
-			return true
-		}
-	}
-	for _, v := range targetVolumes.VolumeMounts {
-		if v.Name == volumeName {
-			return true
-		}
-	}
-	return false
-}
-
-func (r *RestoreManager) initFromAnnotation(synthesizedComponent *component.SynthesizedComponent) (*dpv1alpha1.Backup, error) {
+func (r *RestoreManager) initFromAnnotation(synthesizedComponent *component.SynthesizedComponent, compObj *appsv1.Component) (*dpv1alpha1.Backup, error) {
 	valueString := r.Cluster.Annotations[constant.RestoreFromBackupAnnotationKey]
 	if len(valueString) == 0 {
 		return nil, nil
@@ -282,84 +326,123 @@ func (r *RestoreManager) initFromAnnotation(synthesizedComponent *component.Synt
 	if err != nil {
 		return nil, err
 	}
-	backupSource, ok := backupMap[synthesizedComponent.Name]
+	compName := compObj.Labels[constant.KBAppShardingNameLabelKey]
+	if len(compName) == 0 {
+		compName = synthesizedComponent.Name
+	}
+	backupSource, ok := backupMap[compName]
 	if !ok {
 		return nil, nil
 	}
 	if namespace := backupSource[constant.BackupNamespaceKeyForRestore]; namespace != "" {
 		r.namespace = namespace
-		// TODO: support restore backup to different namespace
-		if namespace != r.Cluster.Namespace {
-			return nil, intctrlutil.NewErrorf(intctrlutil.ErrorTypeRestoreFailed,
-				"unsupported restore backup to different namespace, backup namespace: %s, cluster namespace: %s", namespace, r.Cluster.Namespace)
-		}
 	}
 	if volumeRestorePolicy := backupSource[constant.VolumeRestorePolicyKeyForRestore]; volumeRestorePolicy != "" {
 		r.volumeRestorePolicy = dpv1alpha1.VolumeClaimRestorePolicy(volumeRestorePolicy)
 	}
 	r.restoreTime = backupSource[constant.RestoreTimeKeyForRestore]
-
-	name := backupSource[constant.BackupNameKeyForRestore]
-	if name == "" {
-		return nil, intctrlutil.NewErrorf(intctrlutil.ErrorTypeRestoreFailed,
-			"failed to restore component %s, backup name is empty", synthesizedComponent.Name)
+	doReadyRestoreAfterClusterRunning := backupSource[constant.DoReadyRestoreAfterClusterRunning]
+	if doReadyRestoreAfterClusterRunning == "true" {
+		r.doReadyRestoreAfterClusterRunning = true
 	}
-	backup := &dpv1alpha1.Backup{}
-	if err = r.Client.Get(r.Ctx, client.ObjectKey{Namespace: r.namespace, Name: name}, backup); err != nil {
-		return nil, err
+	if env := backupSource[constant.EnvForRestore]; env != "" {
+		if err = json.Unmarshal([]byte(env), &r.env); err != nil {
+			return nil, err
+		}
 	}
-	return backup, nil
+	if parameters := backupSource[constant.ParametersForRestore]; len(parameters) > 0 {
+		if err = json.Unmarshal([]byte(parameters), &r.parameters); err != nil {
+			return nil, err
+		}
+	}
+	return GetBackupFromClusterAnnotation(r.Ctx, r.Client, backupSource, synthesizedComponent.Name, r.Cluster.Namespace)
 }
 
 // createRestoreAndWait create the restore CR and wait for completion.
-func (r *RestoreManager) createRestoreAndWait(restore *dpv1alpha1.Restore) error {
-	if restore == nil {
+func (r *RestoreManager) createRestoreAndWait(compObj *appsv1.Component, restores ...*dpv1alpha1.Restore) error {
+	if len(restores) == 0 {
 		return nil
 	}
-	if r.Scheme != nil {
-		_ = controllerutil.SetControllerReference(r.Cluster, restore, r.Scheme)
-	}
-	if err := r.Client.Get(r.Ctx, client.ObjectKeyFromObject(restore), restore); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return err
+	for i := range restores {
+		restore := restores[i]
+		if r.Scheme != nil {
+			_ = controllerutil.SetControllerReference(compObj, restore, r.Scheme)
 		}
-		if err = r.Client.Create(r.Ctx, restore); err != nil && !apierrors.IsAlreadyExists(err) {
-			return err
+		if err := r.Client.Get(r.Ctx, client.ObjectKeyFromObject(restore), restore); err != nil {
+			if !apierrors.IsNotFound(err) {
+				return err
+			}
+			if err = r.Client.Create(r.Ctx, restore); err != nil && !apierrors.IsAlreadyExists(err) {
+				return err
+			}
 		}
-	}
 
-	switch restore.Status.Phase {
-	case dpv1alpha1.RestorePhaseCompleted:
-		return nil
-	case dpv1alpha1.RestorePhaseFailed:
-		return intctrlutil.NewErrorf(intctrlutil.ErrorTypeRestoreFailed, `restore "%s" status is Failed, you can describe it and re-restore the cluster.`, restore.GetName())
-	default:
-		return intctrlutil.NewErrorf(intctrlutil.ErrorTypeNeedWaiting, `waiting for restore "%s" successfully`, restore.GetName())
+		switch restore.Status.Phase {
+		case dpv1alpha1.RestorePhaseCompleted:
+			continue
+		case dpv1alpha1.RestorePhaseFailed:
+			return intctrlutil.NewErrorf(intctrlutil.ErrorTypeRestoreFailed, `restore "%s" status is Failed, you can describe it and re-restore the cluster.`, restore.GetName())
+		default:
+			return intctrlutil.NewErrorf(intctrlutil.ErrorTypeNeedWaiting, `waiting for restore "%s" successfully`, restore.GetName())
+		}
 	}
+	return nil
 }
 
-func (r *RestoreManager) cleanupClusterAnnotations() error {
-	if r.Cluster.Status.Phase == appsv1alpha1.RunningClusterPhase && r.Cluster.Annotations != nil {
-		cluster := r.Cluster
-		patch := client.MergeFrom(cluster.DeepCopy())
+func (r *RestoreManager) cleanupRestoreAnnotations(compName string) error {
+	if r.Cluster.Annotations != nil {
+		patch := client.MergeFrom(r.Cluster.DeepCopy())
+		needCleanup, err := CleanupClusterRestoreAnnotation(r.Cluster, compName)
+		if err != nil {
+			return err
+		}
+		if needCleanup {
+			return r.Client.Patch(r.Ctx, r.Cluster, patch)
+		}
+	}
+	return nil
+}
+
+func CleanupClusterRestoreAnnotation(cluster *appsv1.Cluster, compName string) (bool, error) {
+	restoreInfo := cluster.Annotations[constant.RestoreFromBackupAnnotationKey]
+	if restoreInfo == "" {
+		return false, nil
+	}
+	restoreInfoMap := map[string]any{}
+	if err := json.Unmarshal([]byte(restoreInfo), &restoreInfoMap); err != nil {
+		return false, err
+	}
+	delete(restoreInfoMap, compName)
+	if len(restoreInfoMap) == 0 {
 		delete(cluster.Annotations, constant.RestoreFromBackupAnnotationKey)
-		return r.Client.Patch(r.Ctx, cluster, patch)
+	} else {
+		restoreInfoBytes, err := json.Marshal(restoreInfoMap)
+		if err != nil {
+			return false, err
+		}
+		cluster.Annotations[constant.RestoreFromBackupAnnotationKey] = string(restoreInfoBytes)
 	}
-	return nil
+	return true, nil
 }
 
-func (r *RestoreManager) cleanupRestores(comp *component.SynthesizedComponent) error {
-	if r.Cluster.Status.Phase != appsv1alpha1.RunningClusterPhase {
-		return nil
+func GetBackupFromClusterAnnotation(
+	ctx context.Context,
+	cli client.Reader,
+	backupSource map[string]string,
+	compName string,
+	clusterNameSpace string) (*dpv1alpha1.Backup, error) {
+	backupName := backupSource[constant.BackupNameKeyForRestore]
+	if backupName == "" {
+		return nil, intctrlutil.NewErrorf(intctrlutil.ErrorTypeRestoreFailed,
+			"failed to restore component %s, backup name is empty", compName)
 	}
-	restoreList := &dpv1alpha1.RestoreList{}
-	if err := r.Client.List(r.Ctx, restoreList, client.MatchingLabels(constant.GetKBWellKnownLabels(comp.ClusterDefName, r.Cluster.Name, comp.Name))); err != nil {
-		return err
+	namespace := backupSource[constant.BackupNamespaceKeyForRestore]
+	if namespace == "" {
+		namespace = clusterNameSpace
 	}
-	for i := range restoreList.Items {
-		if err := intctrlutil.BackgroundDeleteObject(r.Client, r.Ctx, &restoreList.Items[i]); err != nil {
-			return err
-		}
+	backup := &dpv1alpha1.Backup{}
+	if err := cli.Get(ctx, client.ObjectKey{Name: backupName, Namespace: namespace}, backup); err != nil {
+		return nil, err
 	}
-	return nil
+	return backup, nil
 }

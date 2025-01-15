@@ -26,7 +26,7 @@ Make sure you have all the followings prepared.
 
 * [Install AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
 * [Install kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl)
-* [Install kbcli](./../installation/install-with-kbcli/install-kbcli.md)
+* [Install kbcli](./../installation/install-kbcli.md)
 
 ### Configure access key
 
@@ -85,7 +85,7 @@ Make sure you have all the followings prepared.
 
 * Google Cloud account
 * [Install kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl)
-* [Install kbcli](./../installation/install-with-kbcli/install-kbcli.md)
+* [Install kbcli](./../installation/install-kbcli.md)
   
 ### Configure GCP environment
 
@@ -156,7 +156,7 @@ Make sure you have all the followings prepared.
 
 * Tencent Cloud account
 * [Install kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl)
-* [Install kbcli](./../installation/install-with-kbcli/install-kbcli.md)
+* [Install kbcli](./../installation/install-kbcli.md)
   
 ### Configure TKE environment
 
@@ -208,8 +208,8 @@ The initialization takes about 20 minutes. If the installation fails after a lon
 Make sure you have all the followings prepared.
 
 * Alibaba Cloud account.
-* [Install kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl)
-* [Install kbcli](./../installation/install-with-kbcli/install-kbcli.md)
+* [Install kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl).
+* [Install kbcli](./../installation/install-kbcli.md).
   
 ### Configure ACK environment
 
@@ -312,7 +312,7 @@ kbcli cluster connect mycluster
 
 1. Get Credentials.
    ```bash
-   kbcli cluster connect --show-example --client=cli mycluster
+   kbcli cluster connect --show-example --show-password --client=cli mycluster
    ```
 2. Run `port-forward`.
 
@@ -344,27 +344,6 @@ kbcli cluster connect mycluster
    +--------------------+
    5 rows in set (0.02 sec)
    ```
-
-### Observe a MySQL cluster
-
-KubeBlocks has complete observability capabilities. This section demonstrates the monitoring function of KubeBlocks.
-
-***Steps:***
-
-1. Open the grafana dashboard.
-
-   ```bash
-   kbcli dashboard open kubeblocks-grafana
-   ```
-
-   ***Result***
-
-   A monitoring page on Grafana website is loaded automatically after the command is executed.
-
-2. Click the Dashboard icon on the left bar and two monitoring panels show on the page.
-   ![Dashboards](./../../img/quick_start_dashboards.png)
-3. Click **General** -> **MySQL** to monitor the status of the MySQL cluster created by Playground.
-   ![MySQL_panel](./../../img/quick_start_mysql_panel.png)
 
 ### High availability of MySQL
 

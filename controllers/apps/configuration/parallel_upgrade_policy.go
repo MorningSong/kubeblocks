@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -34,7 +34,7 @@ func init() {
 }
 
 func (p *parallelUpgradePolicy) Upgrade(params reconfigureParams) (ReturnedStatus, error) {
-	funcs := GetRSMRollingUpgradeFuncs()
+	funcs := GetInstanceSetRollingUpgradeFuncs()
 	pods, err := funcs.GetPodsFunc(params)
 	if err != nil {
 		return makeReturnedStatus(ESFailedAndRetry), err

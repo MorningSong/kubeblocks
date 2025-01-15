@@ -12,7 +12,7 @@ versionOverride:
 ## @param image.imagePullSecrets KubeBlocks image pull secrets
 ## @param image.tools.repository KubeBlocks tools image repository
 image:
-  registry: infracreate-registry.cn-zhangjiakou.cr.aliyuncs.com
+  registry: apecloud-registry.cn-zhangjiakou.cr.aliyuncs.com
   repository: apecloud/kubeblocks
   pullPolicy: IfNotPresent
   # Overrides the image tag whose default is the chart appVersion.
@@ -20,12 +20,21 @@ image:
   imagePullSecrets: []
   tools:
     repository: apecloud/kubeblocks-tools
-  datascript:
-    repository: apecloud/kubeblocks-datascript
 
 ## @param replicaCount
 ##
 replicaCount: 1
+
+## MaxConcurrentReconciles for component, instanceSet and opsRequest controllers.
+##
+reconcileWorkers: ""
+
+## k8s client configuration.
+client:
+  # default is 20
+  qps: ""
+  # default is 30
+  burst: ""
 
 ## @param nameOverride
 ##
@@ -101,6 +110,25 @@ podDisruptionBudget:
   # Cannot be used if `minAvailable` is set.
   maxUnavailable:
 
+## Specify the namespaces that the operators will manage, multiple namespaces are separated by commas.
+##
+## @param managedNamespaces
+##
+managedNamespaces:
+
+## Specify the configurations for multi-cluster management.
+##
+## @param multiCluster.kubeConfig
+## @param multiCluster.contexts
+multiCluster:
+  # Configure the kubeconfig secret. The config content should be in the item with the key kubeconfig.
+  kubeConfig:
+  # The path to which kubeconfig is mounted.
+  mountPath: /var/run/secrets/kubeblocks.io/multicluster
+  # Configure the contexts to use, multiple contexts are separated by commas.
+  contexts:
+  # Configure the contexts to be disabled.
+  contextsDisabled:
 
 ## Logger settings
 ##
@@ -192,6 +220,8 @@ serviceMonitor:
   enabled: false
   # metrics server will be exposed at this port.
   port: 8080
+  goRuntime:
+    enabled: false
   # Only used if `service.type` is `NodePort`.
   nodePort:
 
@@ -264,7 +294,6 @@ affinity:
           operator: In
           values:
           - "true"
-
 ## @param data plane settings
 ##
 dataPlane:
@@ -285,15 +314,29 @@ dataPlane:
             values:
             - "true"
 
-## AdmissionWebhooks settings
+# dynamically replace instance's registry. ref: https://github.com/apecloud/kubeblocks/pull/8018
+# e.g.
+# registryConfig: 
+#   defaultRegistry: apecloud-registry.cn-zhangjiakou.cr.aliyuncs.com
+#   defaultNamespace: apecloud
+registryConfig: {}
+
+# Add extra pod labels to KubeBlocks Deployment
+extraLabels: {}
+
+# Add extra annotations to KubeBlocks Deployment
+deployAnnotations: {}
+
+# Add extra pod envs to KubeBlocks Deployment
+extraEnvs: []
+
+## webhooks settings
 ##
-## @param admissionWebhooks.enabled
-## @param admissionWebhooks.createSelfSignedCert
-## @param admissionWebhooks.ignoreReplicasCheck
-admissionWebhooks:
-  enabled: false
+## @param webhooks.conversionEnabled
+## @param webhooks.createSelfSignedCert
+webhooks:
+  conversionEnabled: false
   createSelfSignedCert: true
-  ignoreReplicasCheck: false
 
 ## Data protection settings
 ##
@@ -306,7 +349,26 @@ dataProtection:
   # using the default key can potentially lead to the exposure of database passwords
   # if 'get/list' role of the backup CR are compromised.
   encryptionKey: ""
+  encryptionKeySecretKeyRef:
+    name: ""
+    key: ""
+    skipValidation: false
+  enableBackupEncryption: false
+  backupEncryptionAlgorithm: ""
   gcFrequencySeconds: 3600
+  ## MaxConcurrentReconciles for backup controller.
+  reconcileWorkers: ""
+  worker:
+    serviceAccount:
+      # The name of the service account for worker pods.
+      # ServiceAccount resources will be created in every namespace where a worker pod needs to run.
+      # If not set, a name is generated using the fullname template.
+      name: ""
+
+      # Extra annotations when creating service accounts.
+      # This field is primarily for associating IAM roles in cloud environments.
+      # e.g. EKS associates IAM roles by adding the "eks.amazonaws.com/role-arn" annotation.
+      annotations: {}
 
   image:
     # if the value of dataProtection.image.registry is not specified using `--set`, it will be set to the value of 'image.registry' by default
@@ -318,7 +380,40 @@ dataProtection:
     imagePullSecrets: []
     datasafed:
       repository: apecloud/datasafed
-      tag: "0.0.4"
+      tag: "0.2.0"
+  ## @param toleration
+  tolerations:
+  - key: kb-controller
+    operator: Equal
+    value: "true"
+    effect: NoSchedule
+  ## @param affinity
+  ##
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        preference:
+          matchExpressions:
+          - key: kb-controller
+            operator: In
+            values:
+            - "true"
+  ## @param topologySpreadConstraints
+  topologySpreadConstraints: []
+
+  # Add extra pod labels to KubeBlocks-DataProtection Deployment
+  extraLabels: {}
+
+  # Add extra annotations to KubeBlocks-DataProtection Deployment
+  deployAnnotations: {}
+
+  # Add extra pod envs to KubeBlocks-DataProtection Deployment
+  extraEnvs: []
+
+  ## @param podAnnotations
+  ##
+  podAnnotations: {}
 
 ## BackupRepo settings
 ##
@@ -358,7 +453,7 @@ addonController:
 
 
 ## @param keepAddons - keep Addon CR objects when delete this chart.
-keepAddons: false
+keepAddons: true
 
 ## @param addonChartLocationBase - KubeBlocks official addon's chart location base, to be released in an air-gapped environment.
 ## if url has prefix "file://", KubeBlocks will use the helm charts copied from the addonChartsImage.
@@ -374,6 +469,7 @@ addonChartsImage:
   pullPolicy: IfNotPresent
   tag: ""
   chartsPath: /charts
+  pullSecrets: []
 
 ## @param addonHelmInstallOptions - addon helm install options.
 addonHelmInstallOptions:
@@ -386,6 +482,26 @@ addonHelmInstallOptions:
 ## For avoiding the addon CRs being upgraded when upgrade this chart, set this value to false.
 upgradeAddons: false
 
+## @param autoInstalledAddons - the list of auto-installed addons when install and upgrade.
+autoInstalledAddons:
+  - "apecloud-mysql"
+  - "etcd"
+  - "kafka"
+  - "mongodb"
+  - "mysql"
+  - "postgresql"
+  - "qdrant"
+  - "redis"
+  - "rabbitmq"
+  - "alertmanager-webhook-adaptor"
+  - "aws-load-balancer-controller"
+  - "csi-hostpath-driver"
+  - "csi-driver-nfs"
+  - "grafana"
+  - "prometheus"
+  - "snapshot-controller"
+  - "victoria-metrics-agent"
+
 ## Prometheus Addon
 ##
 prometheus:
@@ -396,7 +512,7 @@ prometheus:
   alertmanager:
     ## If false, alertmanager will not be installed
     ##
-    enabled: true
+    enabled: false
 
     ## alertmanager container image
     ##
@@ -895,6 +1011,18 @@ prometheus:
                 summary: 'MySQL has too many connections (> 80%)'
                 description: '{{ $value | printf "%.2f" }} percent of MySQL connections are in use. (instance: {{ $labels.pod }})'
 
+            - alert: MysqlReplicationLag
+              expr:  |-
+                max by(namespace,app_kubernetes_io_instance,pod) (
+                  max_over_time(mysql_replication_heartbeat_relay_delay_seconds{replication_role=~"slave"}[2m])
+                ) > 3600
+              for: 2m
+              labels:
+                severity: warning
+              annotations:
+                summary: 'MySQL replication lag delay exceeds one hour'
+                description: 'mysql replication relay latency: {{ $value | printf "%.2f" }}. (instance: {{ $labels.pod }})'
+
             - alert: MysqlConnectionErrors
               expr: 'sum(increase(mysql_global_status_connection_errors_total[1m])) BY (namespace,app_kubernetes_io_instance,pod) > 0'
               for: 2m
@@ -952,6 +1080,18 @@ prometheus:
               annotations:
                 summary: 'PostgreSQL is down'
                 description: 'PostgreSQL is down. (instance: {{ $labels.pod }})'
+
+            - alert: PGReplicationLag
+              expr:  |-
+                max by(namespace,app_kubernetes_io_instance,pod) (
+                  max_over_time(pg_replication_lag[2m])
+                ) > 3600
+              for: 2m
+              labels:
+                severity: warning
+              annotations:
+                summary: 'PG replication lag delay exceeds one hour'
+                description: 'PostgresSQL replication relay latency: {{ $value | printf "%.2f" }}. (instance: {{ $labels.pod }})'
 
             - alert: PostgreSQLRestarted
               expr: 'time() - pg_postmaster_start_time_seconds < 60'
@@ -1210,7 +1350,7 @@ prometheus:
               annotations:
                 summary: 'MongoDB is Down'
                 description: 'MongoDB instance is down\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}'
-      
+
             - alert: MongodbRestarted
               expr: 'mongodb_instance_uptime_seconds < 60'
               for: 0m
@@ -1219,7 +1359,7 @@ prometheus:
               annotations:
                 summary: 'Mongodb has just been restarted (< 60s)'
                 description: 'Mongodb has just been restarted {{ $value | printf "%.1f" }} seconds ago\n LABELS = {{ $labels }}'
-      
+
             - alert: MongodbReplicaMemberUnhealthy
               expr: 'max_over_time(mongodb_rs_members_health[1m]) == 0'
               for: 0m
@@ -1228,7 +1368,7 @@ prometheus:
               annotations:
                 summary: 'Mongodb replica member is unhealthy'
                 description: 'MongoDB replica member is not healthy\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}'
-      
+
             - alert: MongodbReplicationLag
               expr: '(mongodb_rs_members_optimeDate{member_state="PRIMARY"} - on (pod) group_right mongodb_rs_members_optimeDate{member_state="SECONDARY"}) / 1000 > 10'
               for: 0m
@@ -1237,7 +1377,7 @@ prometheus:
               annotations:
                 summary: 'MongoDB replication lag (> 10s)'
                 description: 'Mongodb replication lag is more than 10s\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}'
-      
+
             - alert: MongodbReplicationHeadroom
               expr: 'sum(avg(mongodb_mongod_replset_oplog_head_timestamp - mongodb_mongod_replset_oplog_tail_timestamp)) - sum(avg(mongodb_rs_members_optimeDate{member_state="PRIMARY"} - on (pod) group_right mongodb_rs_members_optimeDate{member_state="SECONDARY"})) <= 0'
               for: 0m
@@ -1246,7 +1386,7 @@ prometheus:
               annotations:
                 summary: 'MongoDB replication headroom (< 0)'
                 description: 'MongoDB replication headroom is <= 0\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}'
-      
+
             - alert: MongodbNumberCursorsOpen
               expr: 'mongodb_ss_metrics_cursor_open{csr_type="total"} > 10 * 1000'
               for: 2m
@@ -1255,16 +1395,16 @@ prometheus:
               annotations:
                 summary: 'MongoDB opened cursors num (> 10k)'
                 description: 'Too many cursors opened by MongoDB for clients (> 10k)\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}'
-      
+
             - alert: MongodbCursorsTimeouts
               expr: 'increase(mongodb_ss_metrics_cursor_timedOut[1m]) > 100'
               for: 2m
               labels:
                 severity: warning
               annotations:
-                summary: 'MongoDB cursors timeouts (>100/minute)' 
+                summary: 'MongoDB cursors timeouts (>100/minute)'
                 description: 'Too many cursors are timing out (> 100/minute)\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}'
-      
+
             - alert: MongodbTooManyConnections
               expr: 'avg by(pod) (rate(mongodb_ss_connections{conn_type="current"}[1m])) / avg by(pod) (sum (mongodb_ss_connections) by(pod)) * 100 > 80'
               for: 2m
@@ -1273,7 +1413,7 @@ prometheus:
               annotations:
                 summary: 'MongoDB too many connections (> 80%)'
                 description: 'Too many connections (> 80%)\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}'
-      
+
             - alert: MongodbVirtualMemoryUsage
               expr: '(sum(mongodb_ss_mem_virtual) BY (pod) / sum(mongodb_ss_mem_resident) BY (pod)) > 100'
               for: 2m
@@ -1354,9 +1494,6 @@ prometheus:
         - source_labels: [__meta_kubernetes_service_label_app_kubernetes_io_managed_by]
           action: keep
           regex: kubeblocks
-        - source_labels: [__meta_kubernetes_service_label_monitor_kubeblocks_io_managed_by]
-          action: drop
-          regex: agamotto
         - source_labels: [__meta_kubernetes_service_annotation_monitor_kubeblocks_io_scrape]
           action: keep
           regex: true
@@ -1391,88 +1528,13 @@ prometheus:
           action: replace
           target_label: pod
         - source_labels: [__meta_kubernetes_pod_phase]
-          regex: Pending|Succeeded|Failed|Completed
-          action: drop
-
-      - job_name: 'kubeblocks-agamotto'
-        honor_labels: true
-
-        kubernetes_sd_configs:
-        - role: endpoints
-
-        relabel_configs:
-        - source_labels: [__meta_kubernetes_service_label_monitor_kubeblocks_io_managed_by]
-          action: keep
-          regex: agamotto
-        - source_labels: [__meta_kubernetes_service_annotation_monitor_kubeblocks_io_scrape]
-          action: keep
-          regex: true
-        - source_labels: [__meta_kubernetes_service_annotation_monitor_kubeblocks_io_scheme]
-          action: replace
-          target_label: __scheme__
-          regex: (https?)
-        - source_labels: [__meta_kubernetes_service_annotation_monitor_kubeblocks_io_path]
-          action: replace
-          target_label: __metrics_path__
-          regex: (.+)
-        - source_labels: [__address__, __meta_kubernetes_service_annotation_monitor_kubeblocks_io_port]
-          action: replace
-          target_label: __address__
-          regex: (.+?)(?::\d+)?;(\d+)
-          replacement: $1:$2
-        - action: labelmap
-          regex: __meta_kubernetes_service_annotation_monitor_kubeblocks_io_param_(.+)
-          replacement: __param_$1
-        - source_labels: [__meta_kubernetes_pod_phase]
-          regex: Pending|Succeeded|Failed|Completed
+          regex: Succeeded|Failed|Completed
           action: drop
 
   pushgateway:
     ## If false, pushgateway will not be installed
     ##
     enabled: false
-
-## loki settings for kubeblocks
-loki:
-  enabled: false
-  singleBinary:
-    replicas: 1
-  monitoring:
-    lokiCanary:
-      enabled: false
-    selfMonitoring:
-      enabled: false
-      grafanaAgent:
-        installOperator: false
-    dashboards:
-      enabled: false
-    rules:
-      enabled: false
-    serviceMonitor:
-      enabled: false
-  test:
-    enabled: false
-  loki:
-    auth_enabled: false
-    commonConfig:
-      replication_factor: 1
-    storage:
-      type: filesystem
-    podSecurityContext:
-      runAsNonRoot: false
-      runAsUser: 0
-    limits_config:
-      max_query_lookback: 72h
-      retention_period: 72h
-    compactor:
-      working_directory: /var/loki/retention
-      shared_store: filesystem
-      compaction_interval: 10m
-      retention_enabled: true
-      retention_delete_delay: 2h
-      retention_delete_worker_count: 150
-      delete_request_cancel_period: 2h
-
 
 grafana:
   ## If false, grafana sub-chart will not be installed
@@ -1528,7 +1590,6 @@ grafana:
   defaultDashboardsTimezone:
 
   adminUser: admin
-  adminPassword: kubeblocks
 
   sidecar:
     image:
@@ -1667,30 +1728,6 @@ snapshot-controller:
             values:
             - "true"
 
-kubeblocks-csi-driver:
-  enabled: false
-
-
-cloudProvider:
-  ## cloudProvider secret settings
-  ## @param cloudProvider.accessKey -- S3 Access Key.
-  ## @param cloudProvider.secretKey -- S3 Secret Key.
-  ## @param cloudProvider.region -- S3 region.
-  ## @param cloudProvider.cloud -- cloud name: [aws,aliyun].
-  ## @param cloudProvider.bucket -- S3 Bucket.
-  accessKey: ""
-  secretKey: ""
-  region: ""
-  name: ""
-  bucket: ""
-
-## csi-s3 settings
-## ref: https://artifacthub.io/packages/helm/cloudve/csi-s3#configuration
-##
-csi-s3:
-  ## @param csi-s3.enabled -- Enable csi-s3 chart.
-  ##
-  enabled: false
 
 alertmanager-webhook-adaptor:
   ## Linkage with prometheus.enabled
@@ -1763,13 +1800,6 @@ enabledAlphaFeatureGates:
   recoverVolumeExpansionFailure: false
 
 
-agamotto:
-  enabled: false
-  image:
-    # if the value of agamotto.image.registry is not specified using `--set`, it will be set to the value of 'image.registry' by default
-    registry: ""
-
-
 provider: "" # cloud be "aws","gcp","aliyun","tencentCloud", "huaweiCloud", "azure"
 validProviders:
  - "aws"
@@ -1779,6 +1809,7 @@ validProviders:
  - "huaweiCloud"
  - "azure"
  - ""
+
 ## @section KubeBlocks default storageClass Parameters for cloud provider.
 storageClass:
   ## @param storageClass.name -- Specifies the name of the default storage class.
@@ -1811,13 +1842,112 @@ storageClass:
       volumeType: SSD
       fsType: ext4
 
-external-dns:
-  enabled: false
-  domain: kubeblocks.io
-  tolerations:
-  - key: kb-controller
-    operator: Equal
-    value: "true"
-    effect: NoSchedule
-
 developMode: false
+
+# the final host ports is the difference between include and exclude: include - exclude
+hostPorts:
+  # https://www.w3.org/Daemon/User/Installation/PrivilegedPorts.html
+  # The TCP/IP port numbers below 1024 are special in that normal users are not allowed to run servers on them.
+  # This is a security feaure, in that if you connect to a service on one of these ports you can be fairly sure
+  # that you have the real thing, and not a fake which some hacker has put up for you.
+  include:
+  - "1025-65536"
+  # https://kubernetes.io/docs/reference/networking/ports-and-protocols/
+  # exclude ports used by kubernetes
+  exclude:
+  - "6443"
+  - "10250"
+  - "10257"
+  - "10259"
+  - "2379-2380"
+  - "30000-32767"
+
+controllers:
+  apps:
+    enabled: true
+  workloads:
+    enabled: true
+  operations:
+    enabled: true
+  experimental:
+    enabled: false
+  trace:
+    enabled: false
+
+featureGates:
+  ignoreConfigTemplateDefaultMode:
+    enabled: false
+  ignorePodVerticalScaling:
+    enabled: false
+  componentReplicasAnnotation:
+    enabled: true
+  inPlacePodVerticalScaling:
+    enabled: false
+
+vmagent:
+
+  ## overwrite vmagent scrape_configs
+  config:
+    scrape_configs:
+      # Scrape config for kubeblocks managed service endpoints.
+      #
+      # The relabeling allows the actual service scrape endpoint to be configured
+      # via the following annotations:
+      #
+      # * `monitor.kubeblocks.io/scrape`: Only scrape services that have a value of
+      # `true`.
+      # * `monitor.kubeblocks.io/scheme`: If the metrics endpoint is secured then you will need
+      # to set this to `https` & most likely set the `tls_config` of the scrape config.
+      # * `monitor.kubeblocks.io/path`: If the metrics path is not `/metrics` override this.
+      # * `monitor.kubeblocks.io/port`: If the metrics are exposed on a different port to the
+      # service then set this appropriately.
+      # * `monitor.kubeblocks.io/param_<parameter>`: If the metrics endpoint uses parameters
+      # then you can set any parameter
+      - job_name: 'kubeblocks-service'
+        honor_labels: true
+
+        kubernetes_sd_configs:
+          - role: endpoints
+
+        relabel_configs:
+          - source_labels: [ __meta_kubernetes_service_label_app_kubernetes_io_managed_by ]
+            action: keep
+            regex: kubeblocks
+          - source_labels: [ __meta_kubernetes_service_annotation_monitor_kubeblocks_io_scrape ]
+            action: keep
+            regex: true
+          - source_labels: [ __meta_kubernetes_service_annotation_monitor_kubeblocks_io_scheme ]
+            action: replace
+            target_label: __scheme__
+            regex: (https?)
+          - source_labels: [ __meta_kubernetes_service_annotation_monitor_kubeblocks_io_path ]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [ __address__, __meta_kubernetes_service_annotation_monitor_kubeblocks_io_port ]
+            action: replace
+            target_label: __address__
+            regex: (.+?)(?::\d+)?;(\d+)
+            replacement: $1:$2
+          - action: labelmap
+            regex: __meta_kubernetes_service_annotation_monitor_kubeblocks_io_param_(.+)
+            replacement: __param_$1
+          - action: labelmap
+            regex: __meta_kubernetes_service_label_(.+)
+          - source_labels: [ __meta_kubernetes_namespace ]
+            action: replace
+            target_label: namespace
+          - source_labels: [ __meta_kubernetes_service_name ]
+            action: replace
+            target_label: service
+          - source_labels: [ __meta_kubernetes_pod_node_name ]
+            action: replace
+            target_label: node
+          - source_labels: [ __meta_kubernetes_pod_name ]
+            action: replace
+            target_label: pod
+          - source_labels: [ __meta_kubernetes_pod_phase ]
+            regex: Pending|Succeeded|Failed|Completed
+            action: drop
+
+userAgent: kubeblocks

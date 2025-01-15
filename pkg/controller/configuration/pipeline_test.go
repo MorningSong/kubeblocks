@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -31,34 +31,34 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	appsv1 "github.com/apecloud/kubeblocks/apis/apps/v1"
 	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
+	appsv1beta1 "github.com/apecloud/kubeblocks/apis/apps/v1beta1"
 	cfgcore "github.com/apecloud/kubeblocks/pkg/configuration/core"
 	cfgutil "github.com/apecloud/kubeblocks/pkg/configuration/util"
 	"github.com/apecloud/kubeblocks/pkg/controller/builder"
 	"github.com/apecloud/kubeblocks/pkg/controller/component"
-	intctrlutil "github.com/apecloud/kubeblocks/pkg/controllerutil"
+	"github.com/apecloud/kubeblocks/pkg/controller/render"
 	testapps "github.com/apecloud/kubeblocks/pkg/testutil/apps"
 	testutil "github.com/apecloud/kubeblocks/pkg/testutil/k8s"
 )
 
 var _ = Describe("ConfigurationPipelineTest", func() {
-
 	const testConfigFile = "postgresql.conf"
 
-	var clusterObj *appsv1alpha1.Cluster
-	var clusterVersionObj *appsv1alpha1.ClusterVersion
-	var clusterDefObj *appsv1alpha1.ClusterDefinition
-	var clusterComponent *component.SynthesizedComponent
+	var clusterObj *appsv1.Cluster
+	var componentObj *appsv1.Component
+	var compDefObj *appsv1.ComponentDefinition
+	var synthesizedComponent *component.SynthesizedComponent
 	var configMapObj *corev1.ConfigMap
-	var configConstraint *appsv1alpha1.ConfigConstraint
+	var configConstraint *appsv1beta1.ConfigConstraint
 	var configurationObj *appsv1alpha1.Configuration
 	var k8sMockClient *testutil.K8sClientMockHelper
 
 	mockAPIResource := func(lazyFetcher testutil.Getter) {
 		k8sMockClient.MockGetMethod(testutil.WithGetReturned(testutil.WithConstructSimpleGetResult(
 			[]client.Object{
-				clusterDefObj,
-				clusterVersionObj,
+				compDefObj,
 				clusterObj,
 				clusterObj,
 				configMapObj,
@@ -93,8 +93,9 @@ var _ = Describe("ConfigurationPipelineTest", func() {
 	BeforeEach(func() {
 		// Add any setup steps that needs to be executed before each test
 		k8sMockClient = testutil.NewK8sMockClient()
-		clusterObj, clusterDefObj, clusterVersionObj, _ = newAllFieldsClusterObj(nil, nil, false)
-		clusterComponent = newAllFieldsComponent(clusterDefObj, clusterVersionObj, clusterObj)
+		clusterObj, compDefObj, _ = newAllFieldsClusterObj(nil, false)
+		componentObj = newAllFieldsComponent(clusterObj)
+		synthesizedComponent = newAllFieldsSynthesizedComponent(compDefObj, clusterObj)
 		configMapObj = testapps.NewConfigMap("default", mysqlConfigName,
 			testapps.SetConfigMapData(testConfigFile, `
 bgwriter_delay = '200ms'
@@ -113,13 +114,13 @@ max_connections = '1000'
 			ClusterRef(clusterName).
 			Component(mysqlCompName).
 			GetObject()
-		configConstraint = &appsv1alpha1.ConfigConstraint{
+		configConstraint = &appsv1beta1.ConfigConstraint{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: mysqlConfigConstraintName,
 			},
-			Spec: appsv1alpha1.ConfigConstraintSpec{
-				FormatterConfig: &appsv1alpha1.FormatterConfig{
-					Format: appsv1alpha1.Properties,
+			Spec: appsv1beta1.ConfigConstraintSpec{
+				FileFormatConfig: &appsv1beta1.FileFormatConfig{
+					Format: appsv1beta1.Properties,
 				},
 			}}
 	})
@@ -131,20 +132,21 @@ max_connections = '1000'
 	Context("ConfigPipelineTest", func() {
 		It("NormalTest", func() {
 			By("mock configSpec keys")
-			clusterComponent.ConfigTemplates[0].Keys = []string{testConfigFile}
+			synthesizedComponent.ConfigTemplates[0].Keys = []string{testConfigFile}
 
 			By("create configuration resource")
-			createPipeline := NewCreatePipeline(ReconcileCtx{
-				ResourceCtx: &intctrlutil.ResourceCtx{
+			createPipeline := NewCreatePipeline(render.ReconcileCtx{
+				ResourceCtx: &render.ResourceCtx{
 					Client:        k8sMockClient.Client(),
 					Context:       ctx,
 					Namespace:     testCtx.DefaultNamespace,
 					ClusterName:   clusterName,
 					ComponentName: mysqlCompName,
 				},
-				Cluster:   clusterObj,
-				Component: clusterComponent,
-				PodSpec:   clusterComponent.PodSpec,
+				Cluster:              clusterObj,
+				Component:            componentObj,
+				SynthesizedComponent: synthesizedComponent,
+				PodSpec:              synthesizedComponent.PodSpec,
 			})
 
 			By("mock api resource for configuration")
@@ -184,17 +186,18 @@ max_connections = '1000'
 					Content: cfgutil.ToPointer(`for test`),
 				},
 			}
-			reconcileTask := NewReconcilePipeline(ReconcileCtx{
-				ResourceCtx: createPipeline.ResourceCtx,
-				Cluster:     clusterObj,
-				Component:   clusterComponent,
-				PodSpec:     clusterComponent.PodSpec,
+			reconcileTask := NewReconcilePipeline(render.ReconcileCtx{
+				ResourceCtx:          createPipeline.ResourceCtx,
+				Cluster:              clusterObj,
+				Component:            componentObj,
+				SynthesizedComponent: synthesizedComponent,
+				PodSpec:              synthesizedComponent.PodSpec,
 			}, item, &configurationObj.Status.ConfigurationItemStatus[0], nil)
 
 			By("update configuration resource")
 			err = reconcileTask.InitConfigSpec().
 				Configuration().
-				ConfigMap(configSpecName).
+				ConfigMap(configTemplateName).
 				ConfigConstraints(reconcileTask.ConfigSpec().ConfigConstraintRef).
 				PrepareForTemplate().
 				RerenderTemplate().
@@ -209,7 +212,7 @@ max_connections = '1000'
 			reconcileTask.item.Version = "v2"
 			err = reconcileTask.InitConfigSpec().
 				Configuration().
-				ConfigMap(configSpecName).
+				ConfigMap(configTemplateName).
 				ConfigConstraints(reconcileTask.ConfigSpec().ConfigConstraintRef).
 				PrepareForTemplate().
 				RerenderTemplate().

@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -27,7 +27,7 @@ import (
 	"github.com/StudioSol/set"
 	"github.com/spf13/cast"
 
-	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
+	appsv1beta1 "github.com/apecloud/kubeblocks/apis/apps/v1beta1"
 	"github.com/apecloud/kubeblocks/pkg/configuration/util"
 	"github.com/apecloud/kubeblocks/pkg/unstructured"
 )
@@ -229,9 +229,9 @@ func NewCfgOptions(filename string, options ...Option) CfgOpOption {
 	return context
 }
 
-func WithFormatterConfig(formatConfig *appsv1alpha1.FormatterConfig) Option {
+func WithFormatterConfig(formatConfig *appsv1beta1.FileFormatConfig) Option {
 	return func(ctx *CfgOpOption) {
-		if formatConfig.Format == appsv1alpha1.Ini && formatConfig.IniConfig != nil {
+		if formatConfig.Format == appsv1beta1.Ini && formatConfig.IniConfig != nil {
 			ctx.IniContext = &IniContext{
 				SectionName: formatConfig.IniConfig.SectionName,
 			}
@@ -239,8 +239,8 @@ func WithFormatterConfig(formatConfig *appsv1alpha1.FormatterConfig) Option {
 	}
 }
 
-func NestedPrefixField(formatConfig *appsv1alpha1.FormatterConfig) string {
-	if formatConfig != nil && formatConfig.Format == appsv1alpha1.Ini && formatConfig.IniConfig != nil {
+func NestedPrefixField(formatConfig *appsv1beta1.FileFormatConfig) string {
+	if formatConfig != nil && formatConfig.Format == appsv1beta1.Ini && formatConfig.IniConfig != nil {
 		return formatConfig.IniConfig.SectionName
 	}
 	return ""
@@ -304,7 +304,7 @@ func FromCMKeysSelector(keys []string) *set.LinkedHashSetString {
 	return cmKeySet
 }
 
-func GenerateVisualizedParamsList(configPatch *ConfigPatchInfo, formatConfig *appsv1alpha1.FormatterConfig, sets *set.LinkedHashSetString) []VisualizedParam {
+func GenerateVisualizedParamsList(configPatch *ConfigPatchInfo, formatConfig *appsv1beta1.FileFormatConfig, sets *set.LinkedHashSetString) []VisualizedParam {
 	if !configPatch.IsModify {
 		return nil
 	}
@@ -363,6 +363,11 @@ func flattenMap(m map[string]interface{}, prefix string) []ParameterPair {
 		switch m2 := val.(type) {
 		case map[string]interface{}:
 			r = append(r, flattenMap(m2, fullKey)...)
+		case []interface{}:
+			r = append(r, ParameterPair{
+				Key:   transArrayFieldName(fullKey),
+				Value: util.ToPointer(transJSONString(val)),
+			})
 		default:
 			var v *string = nil
 			if val != nil {
@@ -393,4 +398,41 @@ func generateUpdateKeyParam(files map[string]interface{}, trimPrefix string, upd
 		}
 	}
 	return r
+}
+
+func transJSONString(val interface{}) string {
+	if val == nil {
+		return ""
+	}
+	b, _ := json.Marshal(val)
+	return string(b)
+}
+
+func fromJSONString(val *string) any {
+	if val == nil {
+		return nil
+	}
+	if *val == "" {
+		return []any{}
+	}
+	var v any
+	_ = json.Unmarshal([]byte(*val), &v)
+	return v
+}
+
+const ArrayFieldPrefix = "@"
+
+func transArrayFieldName(key string) string {
+	return ArrayFieldPrefix + key
+}
+
+func hasArrayField(key string) bool {
+	return strings.HasPrefix(key, ArrayFieldPrefix)
+}
+
+func GetValidFieldName(key string) string {
+	if hasArrayField(key) {
+		return strings.TrimPrefix(key, ArrayFieldPrefix)
+	}
+	return key
 }

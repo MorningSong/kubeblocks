@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -22,9 +22,10 @@ package dataprotection
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
-	"golang.org/x/exp/slices"
+	vsv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
@@ -42,7 +43,6 @@ import (
 	dpv1alpha1 "github.com/apecloud/kubeblocks/apis/dataprotection/v1alpha1"
 	"github.com/apecloud/kubeblocks/pkg/constant"
 	intctrlutil "github.com/apecloud/kubeblocks/pkg/controllerutil"
-	dperrors "github.com/apecloud/kubeblocks/pkg/dataprotection/errors"
 	dprestore "github.com/apecloud/kubeblocks/pkg/dataprotection/restore"
 	dptypes "github.com/apecloud/kubeblocks/pkg/dataprotection/types"
 	"github.com/apecloud/kubeblocks/pkg/dataprotection/utils"
@@ -59,6 +59,8 @@ type VolumePopulatorReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims/finalizers,verbs=update
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -86,7 +88,7 @@ func (r *VolumePopulatorReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 				return intctrlutil.RequeueWithError(patchErr, reqCtx.Log, "")
 			}
 			return intctrlutil.Reconciled()
-		} else if intctrlutil.IsTargetError(err, dperrors.ErrorTypeWaitForExternalHandler) && r.ContainPopulatingCondition(pvc) {
+		} else if r.ContainPopulatingCondition(pvc) {
 			// ignore the error if external controller handles it.
 			return intctrlutil.Reconciled()
 		}
@@ -97,7 +99,7 @@ func (r *VolumePopulatorReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *VolumePopulatorReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	return intctrlutil.NewControllerManagedBy(mgr).
 		For(&corev1.PersistentVolumeClaim{}).
 		Owns(&batchv1.Job{}).
 		Complete(r)
@@ -156,6 +158,15 @@ func (r *VolumePopulatorReconciler) validateRestoreAndBuildMGR(reqCtx intctrluti
 	if err := dprestore.ValidateAndInitRestoreMGR(reqCtx, r.Client, restoreMgr); err != nil {
 		return nil, err
 	}
+	saName := restore.Spec.ServiceAccountName
+	if saName == "" {
+		var err error
+		// TODO: update the mcMgr param
+		if saName, err = EnsureWorkerServiceAccount(reqCtx, r.Client, restore.Namespace, nil); err != nil {
+			return nil, err
+		}
+	}
+	restoreMgr.WorkerServiceAccount = saName
 	return restoreMgr, nil
 }
 
@@ -188,16 +199,20 @@ func (r *VolumePopulatorReconciler) Populate(reqCtx intctrlutil.RequestCtx, pvc 
 	}
 	var populatePVC *corev1.PersistentVolumeClaim
 	for i, v := range restoreMgr.PrepareDataBackupSets {
+		target := utils.GetBackupStatusTarget(v.Backup, restoreMgr.Restore.Spec.Backup.SourceTargetName)
+		if target == nil {
+			return intctrlutil.NewFatalError("can not found any source targe in backup " + v.Backup.Name)
+		}
 		if populatePVC == nil {
 			populatePVC, err = r.getPopulatePVC(reqCtx, pvc, v,
-				restoreMgr.Restore.Spec.PrepareDataConfig.DataSourceRef.VolumeSource, nodeName)
+				restoreMgr.Restore, target, nodeName)
 			if err != nil {
 				return err
 			}
 		}
 
 		// 1. build populate job
-		job, err := restoreMgr.BuildVolumePopulateJob(reqCtx, r.Client, v, populatePVC, i)
+		job, err := restoreMgr.BuildVolumePopulateJob(reqCtx, r.Client, v, target, populatePVC, i)
 		if err != nil {
 			return err
 		}
@@ -314,7 +329,8 @@ func (r *VolumePopulatorReconciler) waitForPVCSelectedNode(reqCtx intctrlutil.Re
 func (r *VolumePopulatorReconciler) getPopulatePVC(reqCtx intctrlutil.RequestCtx,
 	pvc *corev1.PersistentVolumeClaim,
 	backupSet dprestore.BackupActionSet,
-	volumeSource,
+	restore *dpv1alpha1.Restore,
+	target *dpv1alpha1.BackupStatusTarget,
 	nodeName string) (*corev1.PersistentVolumeClaim, error) {
 	populatePVCName := getPopulatePVCName(pvc.UID)
 	populatePVC := &corev1.PersistentVolumeClaim{}
@@ -341,10 +357,35 @@ func (r *VolumePopulatorReconciler) getPopulatePVC(reqCtx intctrlutil.RequestCtx
 				AnnSelectedNode: pvc.Annotations[AnnSelectedNode],
 			}
 		}
+
 		if backupSet.UseVolumeSnapshot {
+			// TODO: will be removed in 0.10.0, compatibility handling for version 0.8.
+			prepareDataConfig := restore.Spec.PrepareDataConfig
+			vsName := utils.GetOldBackupVolumeSnapshotName(backupSet.Backup.Name, prepareDataConfig.DataSourceRef.VolumeSource)
+			vsCli := utils.NewCompatClient(r.Client)
+			exist, err := intctrlutil.CheckResourceExists(reqCtx.Ctx, vsCli,
+				types.NamespacedName{Namespace: backupSet.Backup.Namespace, Name: vsName},
+				&vsv1.VolumeSnapshot{})
+			if err != nil {
+				return nil, err
+			}
+			if !exist {
+				sourceTargetPodName, err := dprestore.GetSourcePodNameFromTarget(target, prepareDataConfig.RequiredPolicyForAllPodSelection, 0)
+				if err != nil {
+					return nil, err
+				}
+				if target.PodSelector.Strategy == dpv1alpha1.PodSelectionStrategyAny || sourceTargetPodName != "" {
+					snapshotGroup := dprestore.GetVolumeSnapshotsBySourcePod(backupSet.Backup, target, sourceTargetPodName)
+					if snapshotGroup == nil {
+						message := fmt.Sprintf(`can not found the volumeSnapshot in status.actions, sourceTargetPod is "%s"`, sourceTargetPodName)
+						return nil, intctrlutil.NewFatalError(message)
+					}
+					vsName = snapshotGroup[prepareDataConfig.DataSourceRef.VolumeSource]
+				}
+			}
 			// restore from volume snapshot.
 			populatePVC.Spec.DataSourceRef = &corev1.TypedObjectReference{
-				Name:     utils.GetBackupVolumeSnapshotName(backupSet.Backup.Name, volumeSource),
+				Name:     vsName,
 				Kind:     constant.VolumeSnapshotKind,
 				APIGroup: &dprestore.VolumeSnapshotGroup,
 			}

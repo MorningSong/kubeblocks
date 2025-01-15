@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -24,9 +24,11 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"sort"
@@ -59,11 +61,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	dpv1alpha1 "github.com/apecloud/kubeblocks/apis/dataprotection/v1alpha1"
-	storagev1alpha1 "github.com/apecloud/kubeblocks/apis/storage/v1alpha1"
 	"github.com/apecloud/kubeblocks/pkg/constant"
+	"github.com/apecloud/kubeblocks/pkg/controller/multicluster"
 	intctrlutil "github.com/apecloud/kubeblocks/pkg/controllerutil"
 	dptypes "github.com/apecloud/kubeblocks/pkg/dataprotection/types"
 	"github.com/apecloud/kubeblocks/pkg/dataprotection/utils"
+	"github.com/apecloud/kubeblocks/pkg/dataprotection/utils/boolptr"
 	"github.com/apecloud/kubeblocks/pkg/generics"
 	viper "github.com/apecloud/kubeblocks/pkg/viperx"
 )
@@ -84,7 +87,7 @@ var (
 type reconcileContext struct {
 	intctrlutil.RequestCtx
 	repo       *dpv1alpha1.BackupRepo
-	provider   *storagev1alpha1.StorageProvider
+	provider   *dpv1alpha1.StorageProvider
 	Parameters map[string]string
 	renderCtx  renderContext
 	digest     string
@@ -124,9 +127,10 @@ func (r *reconcileContext) preCheckResourceName() string {
 // BackupRepoReconciler reconciles a BackupRepo object
 type BackupRepoReconciler struct {
 	client.Client
-	Scheme     *runtime.Scheme
-	Recorder   record.EventRecorder
-	RestConfig *rest.Config
+	Scheme          *runtime.Scheme
+	Recorder        record.EventRecorder
+	RestConfig      *rest.Config
+	MultiClusterMgr multicluster.Manager
 
 	secretRefMapper   refObjectMapper
 	providerRefMapper refObjectMapper
@@ -137,11 +141,14 @@ type BackupRepoReconciler struct {
 // +kubebuilder:rbac:groups=dataprotection.kubeblocks.io,resources=backuprepos/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=dataprotection.kubeblocks.io,resources=backuprepos/finalizers,verbs=update
 
-// watch StorageProviders
-// +kubebuilder:rbac:groups=storage.kubeblocks.io,resources=storageproviders,verbs=get;list;watch
+// create or watch StorageProviders
+// +kubebuilder:rbac:groups=dataprotection.kubeblocks.io,resources=storageproviders,verbs=create;get;list;watch
 
 // watch or update Backups
 // +kubebuilder:rbac:groups=dataprotection.kubeblocks.io,resources=backups,verbs=get;list;watch;update;patch
+
+// watch or update Restores
+// +kubebuilder:rbac:groups=dataprotection.kubeblocks.io,resources=restores,verbs=get;list;watch;update;patch
 
 // create or delete StorageClasses
 // +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch;create;delete
@@ -154,6 +161,10 @@ type BackupRepoReconciler struct {
 
 // create or delete Jobs
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+
+// manage service accounts for worker
+// +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -202,7 +213,7 @@ func (r *BackupRepoReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	// check parameters for rendering templates
-	parameters, err := r.checkParameters(reqCtx, repo)
+	parameters, err := r.checkParameters(reqCtx, repo, provider)
 	if err != nil {
 		_ = r.updateStatus(reqCtx, repo)
 		return checkedRequeueWithError(err, reqCtx.Log, "check parameters failed")
@@ -270,6 +281,12 @@ func (r *BackupRepoReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			return checkedRequeueWithError(err, reqCtx.Log,
 				"check associated backups failed")
 		}
+
+		// check associated restores, to create PVC in their namespaces
+		if err = r.prepareForAssociatedRestores(reconCtx); err != nil {
+			return checkedRequeueWithError(err, reqCtx.Log,
+				"check associated restores failed")
+		}
 	}
 
 	return ctrl.Result{}, nil
@@ -308,7 +325,8 @@ func (r *BackupRepoReconciler) updateStatus(reqCtx intctrlutil.RequestCtx, repo 
 	}
 
 	if !reflect.DeepEqual(old.Status, repo.Status) {
-		if err := r.Client.Status().Patch(reqCtx.Ctx, repo, client.MergeFrom(old)); err != nil {
+		if err := r.Client.Status().Patch(reqCtx.Ctx, repo, client.MergeFrom(old),
+			multicluster.InControlContext()); err != nil {
 			return fmt.Errorf("updateStatus failed: %w", err)
 		}
 	}
@@ -335,17 +353,25 @@ func (r *BackupRepoReconciler) updateConditionInDefer(ctx context.Context, repo 
 	}
 }
 
+func (r *BackupRepoReconciler) getStorageProvider(reqCtx intctrlutil.RequestCtx, name string) (*dpv1alpha1.StorageProvider, error) {
+	providerKey := client.ObjectKey{Name: name}
+	provider := &dpv1alpha1.StorageProvider{}
+	err := r.Client.Get(reqCtx.Ctx, providerKey, provider, multicluster.InControlContext())
+	if err != nil {
+		return nil, err
+	}
+	return provider, nil
+}
+
 func (r *BackupRepoReconciler) checkStorageProvider(
-	reqCtx intctrlutil.RequestCtx, repo *dpv1alpha1.BackupRepo) (provider *storagev1alpha1.StorageProvider, err error) {
+	reqCtx intctrlutil.RequestCtx, repo *dpv1alpha1.BackupRepo) (provider *dpv1alpha1.StorageProvider, err error) {
 	reason := ReasonUnknownError
 	defer func() {
 		r.updateConditionInDefer(reqCtx.Ctx, repo, ConditionTypeStorageProviderReady, reason, nil, nil, &err)
 	}()
 
 	// get storage provider object
-	providerKey := client.ObjectKey{Name: repo.Spec.StorageProviderRef}
-	provider = &storagev1alpha1.StorageProvider{}
-	err = r.Client.Get(reqCtx.Ctx, providerKey, provider)
+	provider, err = r.getStorageProvider(reqCtx, repo.Spec.StorageProviderRef)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			reason = ReasonStorageProviderNotFound
@@ -363,7 +389,7 @@ func (r *BackupRepoReconciler) checkStorageProvider(
 			reason = ReasonInvalidStorageProvider
 			return provider, newDependencyError("both StorageClassTemplate and PersistentVolumeClaimTemplate are empty")
 		}
-		csiInstalledCond := meta.FindStatusCondition(provider.Status.Conditions, storagev1alpha1.ConditionTypeCSIDriverInstalled)
+		csiInstalledCond := meta.FindStatusCondition(provider.Status.Conditions, dpv1alpha1.ConditionTypeCSIDriverInstalled)
 		if csiInstalledCond == nil || csiInstalledCond.Status != metav1.ConditionTrue {
 			reason = ReasonStorageProviderNotReady
 			return provider, newDependencyError("CSI driver is not installed")
@@ -381,14 +407,14 @@ func (r *BackupRepoReconciler) checkStorageProvider(
 }
 
 func (r *BackupRepoReconciler) checkParameters(reqCtx intctrlutil.RequestCtx,
-	repo *dpv1alpha1.BackupRepo) (parameters map[string]string, err error) {
+	repo *dpv1alpha1.BackupRepo, provider *dpv1alpha1.StorageProvider) (parameters map[string]string, err error) {
 	reason := ReasonUnknownError
 	defer func() {
 		r.updateConditionInDefer(reqCtx.Ctx, repo, ConditionTypeParametersChecked, reason, nil, nil, &err)
 	}()
 
 	// collect parameters for rendering templates
-	parameters, err = r.collectParameters(reqCtx, repo)
+	parameters, err = r.collectParameters(reqCtx, repo, provider)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			reason = ReasonCredentialSecretNotFound
@@ -443,7 +469,8 @@ func (r *BackupRepoReconciler) createStorageClassAndSecret(reconCtx *reconcileCo
 	}
 
 	if !reflect.DeepEqual(oldRepo.Status, reconCtx.repo.Status) {
-		err := r.Client.Status().Patch(reconCtx.Ctx, reconCtx.repo, client.MergeFrom(oldRepo))
+		err := r.Client.Status().Patch(reconCtx.Ctx, reconCtx.repo, client.MergeFrom(oldRepo),
+			multicluster.InControlContext())
 		if err != nil {
 			return fmt.Errorf("failed to patch backup repo: %w", err)
 		}
@@ -464,7 +491,10 @@ func (r *BackupRepoReconciler) createOrUpdateSecretForCSIDriver(
 		return oldDigest != reconCtx.getDigest()
 	}
 
-	return createOrUpdateObject(reconCtx.Ctx, r.Client, secret, func() error {
+	// Note: the secret (for CSI driver) should be universally created because the pre-check job runs
+	//       in the control cluster.
+	ctx := UniversalContext(reconCtx.Ctx, r.MultiClusterMgr)
+	return createOrUpdateObject(ctx, r.Client, secret, func() error {
 		// render secret template
 		content, err := renderTemplate("secret", reconCtx.provider.Spec.CSIDriverSecretTemplate, reconCtx.renderCtx)
 		if err != nil {
@@ -495,7 +525,7 @@ func (r *BackupRepoReconciler) createOrUpdateSecretForCSIDriver(
 			return fmt.Errorf("failed to set controller reference: %w", err)
 		}
 		return nil
-	}, shouldUpdateFunc)
+	}, shouldUpdateFunc, multicluster.InUniversalContext())
 }
 
 func (r *BackupRepoReconciler) createStorageClass(
@@ -503,7 +533,10 @@ func (r *BackupRepoReconciler) createStorageClass(
 
 	storageClass := &storagev1.StorageClass{}
 	storageClass.Name = reconCtx.repo.Status.GeneratedStorageClassName
-	return createObjectIfNotExist(reconCtx.Ctx, r.Client, storageClass,
+	// Note: the StorageClass should be universally created because the pre-check job runs
+	//       in the control cluster.
+	ctx := UniversalContext(reconCtx.Ctx, r.MultiClusterMgr)
+	return createObjectIfNotExist(ctx, r.Client, storageClass,
 		func() error {
 			// render storage class template
 			content, err := renderTemplate("sc", reconCtx.provider.Spec.StorageClassTemplate, reconCtx.renderCtx)
@@ -527,7 +560,7 @@ func (r *BackupRepoReconciler) createStorageClass(
 				return fmt.Errorf("failed to set owner reference: %w", err)
 			}
 			return nil
-		})
+		}, multicluster.InUniversalContext())
 }
 
 func (r *BackupRepoReconciler) checkPVCTemplate(reconCtx *reconcileContext) (err error) {
@@ -569,7 +602,7 @@ func (r *BackupRepoReconciler) updateToolConfigSecrets(reconCtx *reconcileContex
 	err = r.Client.List(reconCtx.Ctx, secretList, client.MatchingLabels{
 		dataProtectionBackupRepoKey:   reconCtx.repo.Name,
 		dataProtectionIsToolConfigKey: trueVal,
-	})
+	}, multicluster.InDataContextUnspecified())
 	if err != nil {
 		return err
 	}
@@ -585,7 +618,7 @@ func (r *BackupRepoReconciler) updateToolConfigSecrets(reconCtx *reconcileContex
 			secret.Annotations = make(map[string]string)
 		}
 		secret.Annotations[dataProtectionBackupRepoDigestAnnotationKey] = reconCtx.getDigest()
-		if err = r.Client.Patch(reconCtx.Ctx, secret, patch); err != nil {
+		if err = r.Client.Patch(reconCtx.Ctx, secret, patch, multicluster.InDataContext()); err != nil {
 			return err
 		}
 	}
@@ -625,13 +658,20 @@ func (r *BackupRepoReconciler) preCheckRepo(reconCtx *reconcileContext) (err err
 		}
 		r.updateConditionInDefer(reconCtx.Ctx, reconCtx.repo, ConditionTypePreCheckPassed, reason, &status, &message, &err)
 	}()
+
+	namespace := viper.GetString(constant.CfgKeyCtrlrMgrNS)
+	saName, err := EnsureWorkerServiceAccount(reconCtx.RequestCtx, r.Client, namespace, r.MultiClusterMgr)
+	if err != nil {
+		return err
+	}
+
 	var job *batchv1.Job
 	var pvc *corev1.PersistentVolumeClaim
 	switch {
 	case reconCtx.repo.AccessByMount():
-		job, pvc, err = r.runPreCheckJobForMounting(reconCtx)
+		job, pvc, err = r.runPreCheckJobForMounting(reconCtx, namespace, saName)
 	case reconCtx.repo.AccessByTool():
-		job, err = r.runPreCheckJobForTool(reconCtx)
+		job, err = r.runPreCheckJobForTool(reconCtx, namespace, saName)
 	default:
 		err = fmt.Errorf("unknown access method: %s", reconCtx.repo.Spec.AccessMethod)
 	}
@@ -693,9 +733,9 @@ func (r *BackupRepoReconciler) removePreCheckResources(reconCtx *reconcileContex
 	namespace := viper.GetString(constant.CfgKeyCtrlrMgrNS)
 	objKey := client.ObjectKey{Name: name, Namespace: namespace}
 	for _, obj := range objects {
-		err := r.Client.Get(reconCtx.Ctx, objKey, obj)
+		err := r.Client.Get(reconCtx.Ctx, objKey, obj, multicluster.InControlContext())
 		if err == nil {
-			err = intctrlutil.BackgroundDeleteObject(r.Client, reconCtx.Ctx, obj)
+			err = intctrlutil.BackgroundDeleteObject(r.Client, reconCtx.Ctx, obj, multicluster.InControlContext())
 		}
 		if err == nil || apierrors.IsNotFound(err) {
 			continue
@@ -705,13 +745,12 @@ func (r *BackupRepoReconciler) removePreCheckResources(reconCtx *reconcileContex
 	return nil
 }
 
-func (r *BackupRepoReconciler) runPreCheckJobForMounting(reconCtx *reconcileContext) (job *batchv1.Job, pvc *corev1.PersistentVolumeClaim, err error) {
-	namespace := viper.GetString(constant.CfgKeyCtrlrMgrNS)
+func (r *BackupRepoReconciler) runPreCheckJobForMounting(reconCtx *reconcileContext, namespace string, saName string) (job *batchv1.Job, pvc *corev1.PersistentVolumeClaim, err error) {
 	// create PVC
 	pvcName := reconCtx.preCheckResourceName()
 	pvc, err = r.createRepoPVC(reconCtx, pvcName, namespace, map[string]string{
 		dataProtectionBackupRepoDigestAnnotationKey: reconCtx.getDigest(),
-	})
+	}, multicluster.InControlContext())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -720,6 +759,7 @@ func (r *BackupRepoReconciler) runPreCheckJobForMounting(reconCtx *reconcileCont
 	job.Name = reconCtx.preCheckResourceName()
 	job.Namespace = namespace
 	_, err = createObjectIfNotExist(reconCtx.Ctx, r.Client, job, func() error {
+		runAsUser := int64(0)
 		job.Spec = batchv1.JobSpec{
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
@@ -729,12 +769,16 @@ func (r *BackupRepoReconciler) runPreCheckJobForMounting(reconCtx *reconcileCont
 						Image:           viper.GetString(constant.KBToolsImage),
 						ImagePullPolicy: corev1.PullPolicy(viper.GetString(constant.KBImagePullPolicy)),
 						Command: []string{
-							"sh", "-c", `set -ex; echo "pre-check" > /backup/precheck.txt; sync`,
+							"sh", "-c", `set -ex; echo "pre-check" > /backup/precheck.txt; sync; cat /backup/precheck.txt; rm /backup/precheck.txt; sync`,
 						},
 						VolumeMounts: []corev1.VolumeMount{{
 							Name:      "backup-pvc",
 							MountPath: "/backup",
 						}},
+						SecurityContext: &corev1.SecurityContext{
+							AllowPrivilegeEscalation: boolptr.False(),
+							RunAsUser:                &runAsUser,
+						},
 					}},
 					Volumes: []corev1.Volume{{
 						Name: "backup-pvc",
@@ -744,9 +788,13 @@ func (r *BackupRepoReconciler) runPreCheckJobForMounting(reconCtx *reconcileCont
 							},
 						},
 					}},
+					ServiceAccountName: saName,
 				},
 			},
 			BackoffLimit: pointer.Int32(2),
+		}
+		if err := utils.AddTolerations(&job.Spec.Template.Spec); err != nil {
+			return err
 		}
 		for i := range job.Spec.Template.Spec.Containers {
 			intctrlutil.InjectZeroResourcesLimitsIfEmpty(&job.Spec.Template.Spec.Containers[i])
@@ -758,7 +806,7 @@ func (r *BackupRepoReconciler) runPreCheckJobForMounting(reconCtx *reconcileCont
 			dataProtectionBackupRepoDigestAnnotationKey: reconCtx.getDigest(),
 		}
 		return controllerutil.SetControllerReference(reconCtx.repo, job, r.Scheme)
-	})
+	}, multicluster.InControlContext())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -775,21 +823,22 @@ func (r *BackupRepoReconciler) runPreCheckJobForMounting(reconCtx *reconcileCont
 	return job, pvc, nil
 }
 
-func (r *BackupRepoReconciler) runPreCheckJobForTool(reconCtx *reconcileContext) (job *batchv1.Job, err error) {
-	namespace := viper.GetString(constant.CfgKeyCtrlrMgrNS)
+func (r *BackupRepoReconciler) runPreCheckJobForTool(reconCtx *reconcileContext, namespace string, saName string) (job *batchv1.Job, err error) {
 	// create tool config
 	secretName := reconCtx.preCheckResourceName()
 	secret, err := r.createToolConfigSecret(reconCtx, secretName, namespace, map[string]string{
 		dataProtectionBackupRepoDigestAnnotationKey: reconCtx.getDigest(),
-	})
+	}, multicluster.InControlContext())
 	if err != nil {
 		return nil, err
 	}
+	precheckFilePath := filepath.Join("/", reconCtx.repo.Spec.PathPrefix, "precheck.txt")
 	// run pre-check job
 	job = &batchv1.Job{}
 	job.Name = reconCtx.preCheckResourceName()
 	job.Namespace = namespace
 	_, err = createObjectIfNotExist(reconCtx.Ctx, r.Client, job, func() error {
+		runAsUser := int64(0)
 		job.Spec = batchv1.JobSpec{
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
@@ -800,12 +849,19 @@ func (r *BackupRepoReconciler) runPreCheckJobForTool(reconCtx *reconcileContext)
 						ImagePullPolicy: corev1.PullPolicy(viper.GetString(constant.KBImagePullPolicy)),
 						Command: []string{
 							"sh", "-c",
-							`
+							fmt.Sprintf(`
 set -ex
 export PATH="$PATH:$DP_DATASAFED_BIN_PATH"
-echo "pre-check" | datasafed push - /precheck.txt`,
+echo "pre-check" | datasafed push - %s
+datasafed pull %s -
+datasafed rm %s`, precheckFilePath, precheckFilePath, precheckFilePath),
+						},
+						SecurityContext: &corev1.SecurityContext{
+							AllowPrivilegeEscalation: boolptr.False(),
+							RunAsUser:                &runAsUser,
 						},
 					}},
+					ServiceAccountName: saName,
 				},
 			},
 			BackoffLimit: pointer.Int32(2),
@@ -816,12 +872,15 @@ echo "pre-check" | datasafed push - /precheck.txt`,
 		job.Annotations = map[string]string{
 			dataProtectionBackupRepoDigestAnnotationKey: reconCtx.getDigest(),
 		}
+		if err := utils.AddTolerations(&job.Spec.Template.Spec); err != nil {
+			return err
+		}
 		for i := range job.Spec.Template.Spec.Containers {
 			intctrlutil.InjectZeroResourcesLimitsIfEmpty(&job.Spec.Template.Spec.Containers[i])
 		}
 		utils.InjectDatasafedWithConfig(&job.Spec.Template.Spec, secretName, "")
 		return controllerutil.SetControllerReference(reconCtx.repo, job, r.Scheme)
-	})
+	}, multicluster.InControlContext())
 	if err != nil {
 		return nil, err
 	}
@@ -839,7 +898,8 @@ echo "pre-check" | datasafed push - /precheck.txt`,
 }
 
 func (r *BackupRepoReconciler) collectPreCheckFailureMessage(reconCtx *reconcileContext, job *batchv1.Job, pvc *corev1.PersistentVolumeClaim) (string, error) {
-	podList, err := utils.GetAssociatedPodsOfJob(reconCtx.Ctx, r.Client, job.Namespace, job.Name)
+	podList, err := utils.GetAssociatedPodsOfJob(reconCtx.Ctx, r.Client, job.Namespace, job.Name,
+		multicluster.InControlContext())
 	if err != nil {
 		return "", err
 	}
@@ -873,11 +933,11 @@ func (r *BackupRepoReconciler) collectPreCheckFailureMessage(reconCtx *reconcile
 		if err != nil {
 			return err
 		}
-		events, err := fetchObjectEvents(reconCtx.Ctx, r.Client, object)
+		events, err := fetchObjectEvents(reconCtx.Ctx, r.Client, object, multicluster.InControlContext())
 		if err != nil {
 			return err
 		}
-		// kind := object.GetObjectKind().GroupVersionKind().Kind
+
 		kind := gvk.Kind
 		if len(events.Items) == 0 {
 			message += fmt.Sprintf("No events are available for %s/%s.\n\n", kind, client.ObjectKeyFromObject(object))
@@ -910,6 +970,7 @@ func (r *BackupRepoReconciler) collectPreCheckFailureMessage(reconCtx *reconcile
 	return message, nil
 }
 
+// Note: this function only collect logs of pod from the control cluster
 func (r *BackupRepoReconciler) collectFailedPodLogs(ctx context.Context,
 	podList *corev1.PodList, containerName string, limit int64) (string, error) {
 	typedCli, err := corev1client.NewForConfig(r.RestConfig)
@@ -959,11 +1020,12 @@ func (r *BackupRepoReconciler) listAssociatedBackups(
 	for k, v := range extraSelector {
 		selectors[k] = v
 	}
-	err := r.Client.List(ctx, backupList, selectors)
+	err := r.Client.List(ctx, backupList, selectors, multicluster.InControlContext())
 	var filtered []*dpv1alpha1.Backup
 	for idx := range backupList.Items {
 		backup := &backupList.Items[idx]
-		if backup.Status.Phase == dpv1alpha1.BackupPhaseFailed {
+		if backup.Status.Phase == dpv1alpha1.BackupPhaseFailed &&
+			backup.Labels[dptypes.BackupTypeLabelKey] != string(dpv1alpha1.BackupTypeContinuous) {
 			continue
 		}
 		filtered = append(filtered, backup)
@@ -981,27 +1043,14 @@ func (r *BackupRepoReconciler) prepareForAssociatedBackups(reconCtx *reconcileCo
 	// return any error to reconcile the repo
 	var retErr error
 	for _, backup := range backups {
-		switch {
-		case reconCtx.repo.AccessByMount():
-			if _, err := r.createRepoPVC(reconCtx, reconCtx.repo.Status.BackupPVCName, backup.Namespace, nil); err != nil {
-				reconCtx.Log.Error(err, "failed to check or create PVC", "namespace", backup.Namespace)
-				retErr = err
-				continue
-			}
-		case reconCtx.repo.AccessByTool():
-			if _, err := r.createToolConfigSecret(reconCtx, reconCtx.repo.Status.ToolConfigSecretName, backup.Namespace, nil); err != nil {
-				reconCtx.Log.Error(err, "failed to check or create tool config secret", "namespace", backup.Namespace)
-				retErr = err
-				continue
-			}
-		default:
-			retErr = fmt.Errorf("unknown access method: %s", reconCtx.repo.Spec.AccessMethod)
+		err := r.prepareBackupRepoInNamespace(reconCtx, backup.Namespace)
+		if retErr == nil {
+			retErr = err
 		}
-
-		if backup.Labels[dataProtectionWaitRepoPreparationKey] != "" {
+		if err == nil && backup.Labels[dataProtectionWaitRepoPreparationKey] != "" {
 			patch := client.MergeFrom(backup.DeepCopy())
 			delete(backup.Labels, dataProtectionWaitRepoPreparationKey)
-			if err = r.Client.Patch(reconCtx.Ctx, backup, patch); err != nil {
+			if err = r.Client.Patch(reconCtx.Ctx, backup, patch, multicluster.InControlContext()); err != nil {
 				reconCtx.Log.Error(err, "failed to patch backup",
 					"backup", client.ObjectKeyFromObject(backup))
 				retErr = err
@@ -1012,8 +1061,78 @@ func (r *BackupRepoReconciler) prepareForAssociatedBackups(reconCtx *reconcileCo
 	return retErr
 }
 
+func (r *BackupRepoReconciler) prepareBackupRepoInNamespace(reconCtx *reconcileContext, namespace string) error {
+	switch {
+	case reconCtx.repo.AccessByMount():
+		if _, err := r.createRepoPVC(reconCtx, reconCtx.repo.Status.BackupPVCName, namespace, nil,
+			multicluster.InDataContextUnspecified()); err != nil {
+			reconCtx.Log.Error(err, "failed to check or create PVC", "namespace", namespace)
+			return err
+		}
+	case reconCtx.repo.AccessByTool():
+		if _, err := r.createToolConfigSecret(reconCtx, reconCtx.repo.Status.ToolConfigSecretName, namespace, nil,
+			multicluster.InDataContextUnspecified()); err != nil {
+			reconCtx.Log.Error(err, "failed to check or create tool config secret", "namespace", namespace)
+			return err
+		}
+	default:
+		return fmt.Errorf("unknown access method: %s", reconCtx.repo.Spec.AccessMethod)
+	}
+	return nil
+}
+
+func (r *BackupRepoReconciler) listAssociatedRestores(
+	ctx context.Context, repo *dpv1alpha1.BackupRepo, extraSelector map[string]string) ([]*dpv1alpha1.Restore, error) {
+	// list restores associated with the repo
+	restoreList := &dpv1alpha1.RestoreList{}
+	selectors := client.MatchingLabels{
+		dataProtectionBackupRepoKey: repo.Name,
+	}
+	for k, v := range extraSelector {
+		selectors[k] = v
+	}
+	err := r.Client.List(ctx, restoreList, selectors, multicluster.InControlContext())
+	var filtered []*dpv1alpha1.Restore
+	for idx := range restoreList.Items {
+		restore := &restoreList.Items[idx]
+		if restore.Status.Phase == dpv1alpha1.RestorePhaseFailed {
+			continue
+		}
+		filtered = append(filtered, restore)
+	}
+	return filtered, err
+}
+
+func (r *BackupRepoReconciler) prepareForAssociatedRestores(reconCtx *reconcileContext) error {
+	restores, err := r.listAssociatedRestores(reconCtx.Ctx, reconCtx.repo, map[string]string{
+		dataProtectionWaitRepoPreparationKey: trueVal,
+	})
+	if err != nil {
+		return err
+	}
+	// return any error to reconcile the repo
+	var retErr error
+	for _, restore := range restores {
+		err := r.prepareBackupRepoInNamespace(reconCtx, restore.Namespace)
+		if retErr == nil {
+			retErr = err
+		}
+		if err == nil && restore.Labels[dataProtectionWaitRepoPreparationKey] != "" {
+			patch := client.MergeFrom(restore.DeepCopy())
+			delete(restore.Labels, dataProtectionWaitRepoPreparationKey)
+			if err = r.Client.Patch(reconCtx.Ctx, restore, patch, multicluster.InControlContext()); err != nil {
+				reconCtx.Log.Error(err, "failed to patch restore",
+					"restore", client.ObjectKeyFromObject(restore))
+				retErr = err
+				continue
+			}
+		}
+	}
+	return retErr
+}
+
 func (r *BackupRepoReconciler) createRepoPVC(reconCtx *reconcileContext,
-	name, namespace string, extraAnnos map[string]string) (*corev1.PersistentVolumeClaim, error) {
+	name, namespace string, extraAnnos map[string]string, mcOpt *multicluster.ClientOption) (*corev1.PersistentVolumeClaim, error) {
 
 	pvc := &corev1.PersistentVolumeClaim{}
 	pvc.Name = name
@@ -1067,7 +1186,7 @@ func (r *BackupRepoReconciler) createRepoPVC(reconCtx *reconcileContext,
 				return fmt.Errorf("failed to set owner reference: %w", err)
 			}
 			return nil
-		})
+		}, mcOpt)
 
 	return pvc, err
 }
@@ -1079,7 +1198,7 @@ func constructToolConfigSecret(secret *corev1.Secret, content string) {
 }
 
 func (r *BackupRepoReconciler) createToolConfigSecret(reconCtx *reconcileContext,
-	name, namespace string, extraAnnos map[string]string) (*corev1.Secret, error) {
+	name, namespace string, extraAnnos map[string]string, mcOpt *multicluster.ClientOption) (*corev1.Secret, error) {
 
 	secret := &corev1.Secret{}
 	secret.Name = name
@@ -1107,32 +1226,69 @@ func (r *BackupRepoReconciler) createToolConfigSecret(reconCtx *reconcileContext
 				return fmt.Errorf("failed to set owner reference: %w", err)
 			}
 			return nil
-		})
+		}, mcOpt)
 
 	return secret, err
 }
 
-func (r *BackupRepoReconciler) collectParameters(
-	reqCtx intctrlutil.RequestCtx, repo *dpv1alpha1.BackupRepo) (map[string]string, error) {
-	values := make(map[string]string)
-	for k, v := range repo.Spec.Config {
-		values[k] = v
+func extractDefaultValues(provider *dpv1alpha1.StorageProvider) map[string]string {
+	result := make(map[string]string)
+	if provider.Spec.ParametersSchema == nil || provider.Spec.ParametersSchema.OpenAPIV3Schema == nil {
+		return result
 	}
-	// merge with secret values
+	schema := provider.Spec.ParametersSchema.OpenAPIV3Schema
+	for name, prop := range schema.Properties {
+		if prop.Default == nil {
+			continue
+		}
+		var strVal string
+		err := json.Unmarshal(prop.Default.Raw, &strVal)
+		if err == nil {
+			result[name] = strVal
+		} else {
+			// boolean or number types
+			result[name] = string(prop.Default.Raw)
+		}
+	}
+	return result
+}
+
+func mergeParameters(maps ...map[string]string) map[string]string {
+	merged := make(map[string]string)
+	mergeFn := func(m map[string]string) {
+		for k, v := range m {
+			merged[k] = v
+		}
+	}
+	for _, m := range maps {
+		mergeFn(m)
+	}
+	return merged
+}
+
+func (r *BackupRepoReconciler) collectParameters(
+	reqCtx intctrlutil.RequestCtx, repo *dpv1alpha1.BackupRepo,
+	provider *dpv1alpha1.StorageProvider) (map[string]string, error) {
+
+	defaultValues := extractDefaultValues(provider)
+
+	var valuesFromSecret map[string]string
 	if repo.Spec.Credential != nil {
+		// Note: this secret is created by the user and placed in the control cluster
 		secretObj := &corev1.Secret{}
 		err := r.Client.Get(reqCtx.Ctx, client.ObjectKey{
 			Namespace: repo.Spec.Credential.Namespace,
 			Name:      repo.Spec.Credential.Name,
-		}, secretObj)
+		}, secretObj, multicluster.InControlContext())
 		if err != nil {
 			return nil, fmt.Errorf("failed to get secret: %w", err)
 		}
+		valuesFromSecret = make(map[string]string)
 		for k, v := range secretObj.Data {
-			values[k] = string(v)
+			valuesFromSecret[k] = string(v)
 		}
 	}
-	return values, nil
+	return mergeParameters(defaultValues, repo.Spec.Config, valuesFromSecret), nil
 }
 
 func (r *BackupRepoReconciler) deleteExternalResources(
@@ -1141,7 +1297,7 @@ func (r *BackupRepoReconciler) deleteExternalResources(
 	if repo.Status.Phase != dpv1alpha1.BackupRepoDeleting {
 		patch := client.MergeFrom(repo.DeepCopy())
 		repo.Status.Phase = dpv1alpha1.BackupRepoDeleting
-		if err := r.Client.Status().Patch(reqCtx.Ctx, repo, patch); err != nil {
+		if err := r.Client.Status().Patch(reqCtx.Ctx, repo, patch, multicluster.InControlContext()); err != nil {
 			return err
 		}
 	}
@@ -1159,7 +1315,7 @@ func (r *BackupRepoReconciler) deleteExternalResources(
 	}
 
 	// delete pre-check jobs
-	if err := r.deleteJobs(reqCtx, repo); err != nil {
+	if err := r.deletePreCheckJobs(reqCtx, repo); err != nil {
 		return err
 	}
 
@@ -1197,12 +1353,13 @@ func (r *BackupRepoReconciler) deleteExternalResources(
 	return nil
 }
 
-func (r *BackupRepoReconciler) deleteJobs(reqCtx intctrlutil.RequestCtx, repo *dpv1alpha1.BackupRepo) error {
+func (r *BackupRepoReconciler) deletePreCheckJobs(reqCtx intctrlutil.RequestCtx, repo *dpv1alpha1.BackupRepo) error {
+	// Note: pre-check jobs are run in the control cluster
 	jobList := &batchv1.JobList{}
 	if err := r.Client.List(reqCtx.Ctx, jobList,
 		client.MatchingLabels(map[string]string{
 			dataProtectionBackupRepoKey: repo.Name,
-		})); err != nil {
+		}), multicluster.InControlContext()); err != nil {
 		return fmt.Errorf("failed to list Jobs: %w", err)
 	}
 
@@ -1211,7 +1368,7 @@ func (r *BackupRepoReconciler) deleteJobs(reqCtx intctrlutil.RequestCtx, repo *d
 			continue
 		}
 		reqCtx.Log.Info("deleting job", "name", job.Name, "namespace", job.Namespace)
-		if err := intctrlutil.BackgroundDeleteObject(r.Client, reqCtx.Ctx, &job); err != nil {
+		if err := intctrlutil.BackgroundDeleteObject(r.Client, reqCtx.Ctx, &job, multicluster.InControlContext()); err != nil {
 			return err
 		}
 	}
@@ -1220,10 +1377,11 @@ func (r *BackupRepoReconciler) deleteJobs(reqCtx intctrlutil.RequestCtx, repo *d
 
 func (r *BackupRepoReconciler) deletePVCs(reqCtx intctrlutil.RequestCtx, repo *dpv1alpha1.BackupRepo) (cleared bool, err error) {
 	pvcList := &corev1.PersistentVolumeClaimList{}
-	if err := r.Client.List(reqCtx.Ctx, pvcList,
+	ctx := UniversalContext(reqCtx.Ctx, r.MultiClusterMgr)
+	if err := r.List(ctx, pvcList,
 		client.MatchingLabels(map[string]string{
 			dataProtectionBackupRepoKey: repo.Name,
-		})); err != nil {
+		}), multicluster.InUniversalContext()); err != nil {
 		return false, fmt.Errorf("failed to list PVCs: %w", err)
 	}
 
@@ -1232,7 +1390,8 @@ func (r *BackupRepoReconciler) deletePVCs(reqCtx intctrlutil.RequestCtx, repo *d
 			continue
 		}
 		reqCtx.Log.Info("deleting PVC", "name", pvc.Name, "namespace", pvc.Namespace)
-		if err := intctrlutil.BackgroundDeleteObject(r.Client, reqCtx.Ctx, &pvc); err != nil {
+		if err := intctrlutil.BackgroundDeleteObject(r.Client, ctx, &pvc,
+			multicluster.InUniversalContext()); err != nil {
 			return false, err
 		}
 	}
@@ -1242,7 +1401,8 @@ func (r *BackupRepoReconciler) deletePVCs(reqCtx intctrlutil.RequestCtx, repo *d
 		if !isOwned(repo, &pvc) {
 			continue
 		}
-		err = r.Client.Get(reqCtx.Ctx, client.ObjectKeyFromObject(&pvc), &corev1.PersistentVolumeClaim{})
+		clonePvc := pvc.DeepCopy() // Copy the placement annotation
+		err = r.Client.Get(ctx, client.ObjectKeyFromObject(&pvc), clonePvc, multicluster.InUniversalContext())
 		if !apierrors.IsNotFound(err) {
 			cleared = false
 			break
@@ -1253,10 +1413,11 @@ func (r *BackupRepoReconciler) deletePVCs(reqCtx intctrlutil.RequestCtx, repo *d
 
 func (r *BackupRepoReconciler) deleteStorageClasses(reqCtx intctrlutil.RequestCtx, repo *dpv1alpha1.BackupRepo) error {
 	scList := &storagev1.StorageClassList{}
-	if err := r.Client.List(reqCtx.Ctx, scList,
+	ctx := UniversalContext(reqCtx.Ctx, r.MultiClusterMgr)
+	if err := r.List(ctx, scList,
 		client.MatchingLabels(map[string]string{
 			dataProtectionBackupRepoKey: repo.Name,
-		})); err != nil {
+		}), multicluster.InUniversalContext()); err != nil {
 		return fmt.Errorf("failed to list StorageClasses: %w", err)
 	}
 
@@ -1265,7 +1426,8 @@ func (r *BackupRepoReconciler) deleteStorageClasses(reqCtx intctrlutil.RequestCt
 			continue
 		}
 		reqCtx.Log.Info("deleting StorageClass", "storageclass", sc.Name)
-		if err := intctrlutil.BackgroundDeleteObject(r.Client, reqCtx.Ctx, &sc); err != nil {
+		if err := intctrlutil.BackgroundDeleteObject(r.Client, ctx, &sc,
+			multicluster.InUniversalContext()); err != nil {
 			return err
 		}
 	}
@@ -1274,10 +1436,11 @@ func (r *BackupRepoReconciler) deleteStorageClasses(reqCtx intctrlutil.RequestCt
 
 func (r *BackupRepoReconciler) deleteSecrets(reqCtx intctrlutil.RequestCtx, repo *dpv1alpha1.BackupRepo) error {
 	secretList := &corev1.SecretList{}
-	if err := r.Client.List(reqCtx.Ctx, secretList,
+	ctx := UniversalContext(reqCtx.Ctx, r.MultiClusterMgr)
+	if err := r.List(ctx, secretList,
 		client.MatchingLabels(map[string]string{
 			dataProtectionBackupRepoKey: repo.Name,
-		})); err != nil {
+		}), multicluster.InUniversalContext()); err != nil {
 		return fmt.Errorf("failed to list Secret: %w", err)
 	}
 
@@ -1286,7 +1449,8 @@ func (r *BackupRepoReconciler) deleteSecrets(reqCtx intctrlutil.RequestCtx, repo
 			continue
 		}
 		reqCtx.Log.Info("deleting Secret", "secret", client.ObjectKeyFromObject(&secret))
-		if err := intctrlutil.BackgroundDeleteObject(r.Client, reqCtx.Ctx, &secret); err != nil {
+		if err := intctrlutil.BackgroundDeleteObject(r.Client, ctx, &secret,
+			multicluster.InUniversalContext()); err != nil {
 			return err
 		}
 	}
@@ -1300,7 +1464,8 @@ func (r *BackupRepoReconciler) mapBackupToRepo(ctx context.Context, obj client.O
 		return nil
 	}
 	// ignore failed backups
-	if backup.Status.Phase == dpv1alpha1.BackupPhaseFailed {
+	if backup.Status.Phase == dpv1alpha1.BackupPhaseFailed &&
+		backup.Labels[dptypes.BackupTypeLabelKey] != string(dpv1alpha1.BackupTypeContinuous) {
 		return nil
 	}
 	// we should reconcile the BackupRepo when:
@@ -1308,6 +1473,27 @@ func (r *BackupRepoReconciler) mapBackupToRepo(ctx context.Context, obj client.O
 	//   2. the Backup is being deleted, because it may block the deletion of the BackupRepo.
 	shouldReconcileRepo := backup.Labels[dataProtectionWaitRepoPreparationKey] == trueVal ||
 		!backup.DeletionTimestamp.IsZero()
+	if shouldReconcileRepo {
+		return []ctrl.Request{{
+			NamespacedName: client.ObjectKey{Name: repoName},
+		}}
+	}
+	return nil
+}
+
+func (r *BackupRepoReconciler) mapRestoreToRepo(ctx context.Context, obj client.Object) []ctrl.Request {
+	restore := obj.(*dpv1alpha1.Restore)
+	repoName, ok := restore.Labels[dataProtectionBackupRepoKey]
+	if !ok {
+		return nil
+	}
+	// ignore failed restores
+	if restore.Status.Phase == dpv1alpha1.RestorePhaseFailed {
+		return nil
+	}
+	// we should reconcile the BackupRepo when:
+	//   1. the Restore needs to use the BackupRepo, but it's not ready for the namespace.
+	shouldReconcileRepo := restore.Labels[dataProtectionWaitRepoPreparationKey] == trueVal
 	if shouldReconcileRepo {
 		return []ctrl.Request{{
 			NamespacedName: client.ObjectKey{Name: repoName},
@@ -1341,21 +1527,31 @@ func (r *BackupRepoReconciler) mapSecretToRepos(ctx context.Context, obj client.
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *BackupRepoReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// For collecting events of pre-check jobs/pods
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &corev1.Event{}, "involvedObject.uid", func(rawObj client.Object) []string {
 		event := rawObj.(*corev1.Event)
 		return []string{string(event.InvolvedObject.UID)}
 	}); err != nil {
 		return err
 	}
-	return ctrl.NewControllerManagedBy(mgr).
+	b := intctrlutil.NewControllerManagedBy(mgr).
 		For(&dpv1alpha1.BackupRepo{}).
-		Watches(&storagev1alpha1.StorageProvider{}, handler.EnqueueRequestsFromMapFunc(r.mapProviderToRepos)).
+		Watches(&dpv1alpha1.StorageProvider{}, handler.EnqueueRequestsFromMapFunc(r.mapProviderToRepos)).
 		Watches(&dpv1alpha1.Backup{}, handler.EnqueueRequestsFromMapFunc(r.mapBackupToRepo)).
+		Watches(&dpv1alpha1.Restore{}, handler.EnqueueRequestsFromMapFunc(r.mapRestoreToRepo)).
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.mapSecretToRepos)).
 		Owns(&storagev1.StorageClass{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
-		Owns(&batchv1.Job{}).
-		Complete(r)
+		Owns(&batchv1.Job{}) // For pre-check jobs
+
+	if r.MultiClusterMgr != nil {
+		owner := &dpv1alpha1.BackupRepo{}
+		r.MultiClusterMgr.Watch(b, &corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.mapSecretToRepos)).
+			Own(b, &storagev1.StorageClass{}, owner).
+			Own(b, &corev1.PersistentVolumeClaim{}, owner)
+	}
+
+	return b.Complete(r)
 }
 
 // ============================================================================
@@ -1413,9 +1609,10 @@ func createOrUpdateObject[T any, PT generics.PObject[T]](
 	c client.Client,
 	obj PT,
 	mutateFunc func() error,
-	shouldUpdate func() bool) (created bool, err error) {
+	shouldUpdate func() bool,
+	options ...*multicluster.ClientOption) (created bool, err error) {
 	key := client.ObjectKeyFromObject(obj)
-	err = c.Get(ctx, key, obj)
+	err = c.Get(ctx, key, obj, convertToGetOptions(options)...)
 	if err != nil && !apierrors.IsNotFound(err) {
 		return false, fmt.Errorf("failed to check existence of object %s: %w", key, err)
 	}
@@ -1434,13 +1631,13 @@ func createOrUpdateObject[T any, PT generics.PObject[T]](
 		}
 	}
 	if patch != nil {
-		err = c.Patch(ctx, obj, patch)
+		err = c.Patch(ctx, obj, patch, convertToPatchOptions(options)...)
 		if err != nil {
 			err = fmt.Errorf("failed to patch object %s: %w", key, err)
 		}
 		return false, err
 	} else {
-		err = c.Create(ctx, obj)
+		err = c.Create(ctx, obj, convertToCreateOptions(options)...)
 		if err != nil {
 			return false, fmt.Errorf("failed to create object %s: %w", key, err)
 		}
@@ -1452,9 +1649,34 @@ func createObjectIfNotExist[T any, PT generics.PObject[T]](
 	ctx context.Context,
 	c client.Client,
 	obj PT,
-	mutateFunc func() error) (created bool, err error) {
+	mutateFunc func() error,
+	options ...*multicluster.ClientOption) (created bool, err error) {
 	noUpdate := func() bool { return false }
-	return createOrUpdateObject(ctx, c, obj, mutateFunc, noUpdate)
+	return createOrUpdateObject(ctx, c, obj, mutateFunc, noUpdate, options...)
+}
+
+func convertToGetOptions(opts []*multicluster.ClientOption) []client.GetOption {
+	var ret []client.GetOption
+	for _, opt := range opts {
+		ret = append(ret, opt)
+	}
+	return ret
+}
+
+func convertToPatchOptions(opts []*multicluster.ClientOption) []client.PatchOption {
+	var ret []client.PatchOption
+	for _, opt := range opts {
+		ret = append(ret, opt)
+	}
+	return ret
+}
+
+func convertToCreateOptions(opts []*multicluster.ClientOption) []client.CreateOption {
+	var ret []client.CreateOption
+	for _, opt := range opts {
+		ret = append(ret, opt)
+	}
+	return ret
 }
 
 func setCondition(
@@ -1483,7 +1705,7 @@ func updateCondition(
 	}
 	patch := client.MergeFrom(repo.DeepCopy())
 	setCondition(repo, condType, status, reason, message)
-	return c.Status().Patch(ctx, repo, patch)
+	return c.Status().Patch(ctx, repo, patch, multicluster.InControlContext())
 }
 
 func updateAnnotations(ctx context.Context, c client.Client,
@@ -1502,7 +1724,7 @@ func updateAnnotations(ctx context.Context, c client.Client,
 	if !updated {
 		return nil
 	}
-	return c.Patch(ctx, repo, patch)
+	return c.Patch(ctx, repo, patch, multicluster.InControlContext())
 }
 
 func md5Digest(s string) string {
@@ -1549,17 +1771,22 @@ func randomNameForDerivedObject(repo *dpv1alpha1.BackupRepo, prefix string) stri
 
 func cutName(name string) string {
 	if len(name) > 63 {
-		return name[:63]
+		return strings.TrimSuffix(name[:63], "-")
 	}
 	return name
 }
 
 // this method requires the corresponding field index to be added to the Manager
-func fetchObjectEvents(ctx context.Context, cli client.Client, object client.Object) (*corev1.EventList, error) {
+func fetchObjectEvents(ctx context.Context, cli client.Client, object client.Object, opts ...client.ListOption) (*corev1.EventList, error) {
 	eventList := &corev1.EventList{}
-	err := cli.List(ctx, eventList, client.MatchingFields{
-		"involvedObject.uid": string(object.GetUID()),
-	})
+	opts = append(
+		[]client.ListOption{
+			client.MatchingFields{
+				"involvedObject.uid": string(object.GetUID()),
+			},
+		},
+		opts...)
+	err := cli.List(ctx, eventList, opts...)
 	if err != nil {
 		return nil, err
 	}

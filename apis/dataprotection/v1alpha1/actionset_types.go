@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,59 +23,76 @@ import (
 
 // ActionSetSpec defines the desired state of ActionSet
 type ActionSetSpec struct {
-	// backupType specifies the backup type, supported values: Full, Continuous.
-	// Full means full backup.
-	// Incremental means back up data that have changed since the last backup (full or incremental).
-	// Differential means back up data that have changed since the last full backup.
-	// Continuous will back up the transaction log continuously, the PITR (Point in Time Recovery).
-	// can be performed based on the continuous backup and full backup.
-	// +kubebuilder:validation:Enum={Full,Incremental,Differential,Continuous}
+	// Specifies the backup type. Supported values include:
+	//
+	// - `Full` for a full backup.
+	// - `Incremental` back up data that have changed since the last backup (either full or incremental).
+	// - `Differential` back up data that has changed since the last full backup.
+	// - `Continuous` back up transaction logs continuously, such as MySQL binlog, PostgreSQL WAL, etc.
+	// - `Selective` back up data more precisely, use custom parameters, such as specific databases or tables.
+	//
+	// Continuous backup is essential for implementing Point-in-Time Recovery (PITR).
+	//
+	// +kubebuilder:validation:Enum={Full,Incremental,Differential,Continuous,Selective}
 	// +kubebuilder:default=Full
 	// +kubebuilder:validation:Required
 	BackupType BackupType `json:"backupType"`
 
-	// List of environment variables to set in the container.
+	// Specifies the schema of parameters in backups and restores before their usage.
+	//
+	// +optional
+	ParametersSchema *ActionSetParametersSchema `json:"parametersSchema,omitempty"`
+
+	// Specifies a list of environment variables to be set in the container.
+	//
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +optional
 	Env []corev1.EnvVar `json:"env,omitempty" patchStrategy:"merge" patchMergeKey:"name"`
 
-	// List of sources to populate environment variables in the container.
-	// The keys defined within a source must be a C_IDENTIFIER. All invalid keys
-	// will be reported as an event when the container is starting. When a key exists in multiple
-	// sources, the value associated with the last source will take precedence.
-	// Values defined by an Env with a duplicate key will take precedence.
-	// Cannot be updated.
+	// Specifies a list of sources to populate environment variables in the container.
+	// The keys within a source must be a C_IDENTIFIER. Any invalid keys will be
+	// reported as an event when the container starts. If a key exists in multiple
+	// sources, the value from the last source will take precedence. Any values
+	// defined by an Env with a duplicate key will take precedence.
+	//
+	// This field cannot be updated.
+	//
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +optional
 	EnvFrom []corev1.EnvFromSource `json:"envFrom,omitempty"`
 
-	// backup specifies the backup action.
+	// Specifies the backup action.
+	//
 	// +optional
 	Backup *BackupActionSpec `json:"backup,omitempty"`
 
-	// restore specifies the restore action.
+	// Specifies the restore action.
+	//
 	// +optional
 	Restore *RestoreActionSpec `json:"restore,omitempty"`
 }
 
 // ActionSetStatus defines the observed state of ActionSet
 type ActionSetStatus struct {
-	// phase - in list of [Available,Unavailable]
+	// Indicates the phase of the ActionSet. This can be either 'Available' or 'Unavailable'.
+	//
 	// +optional
 	Phase Phase `json:"phase,omitempty"`
 
-	// A human-readable message indicating details about why the ActionSet is in this phase.
+	// Provides a human-readable explanation detailing the reason for the current phase of the ActionSet.
+	//
 	// +optional
 	Message string `json:"message,omitempty"`
 
-	// generation number
+	// Represents the generation number that has been observed by the controller.
+	//
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 }
 
 // BackupType the backup type.
 // +enum
-// +kubebuilder:validation:Enum={Full,Incremental,Differential,Continuous}
+// +kubebuilder:validation:Enum={Full,Incremental,Differential,Continuous,Selective}
 type BackupType string
 
 const (
@@ -83,39 +100,58 @@ const (
 	BackupTypeIncremental  BackupType = "Incremental"
 	BackupTypeDifferential BackupType = "Differential"
 	BackupTypeContinuous   BackupType = "Continuous"
+	BackupTypeSelective    BackupType = "Selective"
 )
 
 type BackupActionSpec struct {
-	// backupData specifies the backup data action.
+	// Represents the action to be performed for backing up data.
+	//
 	// +kubebuilder:validation:Required
 	BackupData *BackupDataActionSpec `json:"backupData,omitempty"`
 
-	// preBackup specifies a hook that should be executed before the backup.
+	// Represents a set of actions that should be executed before the backup process begins.
+	//
 	// +optional
 	PreBackup []ActionSpec `json:"preBackup,omitempty"`
 
-	// postBackup specifies a hook that should be executed after the backup.
+	// Represents a set of actions that should be executed after the backup process has completed.
+	//
 	// +optional
 	PostBackup []ActionSpec `json:"postBackup,omitempty"`
+
+	// Represents a custom deletion action that can be executed before the built-in deletion action.
+	// Note: The preDelete action job will ignore the env/envFrom.
+	//
+	// +optional
+	PreDeleteBackup *BaseJobActionSpec `json:"preDelete,omitempty"`
+
+	// Specifies the parameters used by the backup action
+	//
+	// +optional
+	WithParameters []string `json:"withParameters,omitempty"`
 }
 
 // BackupDataActionSpec defines how to back up data.
 type BackupDataActionSpec struct {
 	JobActionSpec `json:",inline"`
 
-	// syncProgress specifies whether to sync the backup progress and its interval seconds.
+	// Determines if the backup progress should be synchronized and the interval
+	// for synchronization in seconds.
+	//
 	// +optional
 	SyncProgress *SyncProgress `json:"syncProgress,omitempty"`
 }
 
 type SyncProgress struct {
-	// enabled specifies whether to sync the backup progress. If enabled,
-	// a sidecar container will be created to sync the backup progress to the
-	// Backup CR status.
+	// Determines if the backup progress should be synchronized. If set to true,
+	// a sidecar container will be instantiated to synchronize the backup progress with the
+	// Backup Custom Resource (CR) status.
+	//
 	// +optional
 	Enabled *bool `json:"enabled,omitempty"`
 
-	// intervalSeconds specifies the interval seconds to sync the backup progress.
+	// Defines the interval in seconds for synchronizing the backup progress.
+	//
 	// +optional
 	// +kubebuilder:default=60
 	IntervalSeconds *int32 `json:"intervalSeconds,omitempty"`
@@ -123,22 +159,37 @@ type SyncProgress struct {
 
 // RestoreActionSpec defines how to restore data.
 type RestoreActionSpec struct {
-	// prepareData specifies the action to prepare data.
+	// Specifies the action required to prepare data for restoration.
+	//
 	// +optional
 	PrepareData *JobActionSpec `json:"prepareData,omitempty"`
 
-	// postReady specifies the action to execute after the data is ready.
+	// Specifies the actions that should be executed after the data has been prepared and is ready for restoration.
+	//
 	// +optional
 	PostReady []ActionSpec `json:"postReady,omitempty"`
+
+	// Determines if a base backup is required during restoration.
+	//
+	// +optional
+	// +kubebuilder:default=true
+	BaseBackupRequired *bool `json:"baseBackupRequired,omitempty"`
+
+	// Specifies the parameters used by the restore action
+	//
+	// +optional
+	WithParameters []string `json:"withParameters,omitempty"`
 }
 
 // ActionSpec defines an action that should be executed. Only one of the fields may be set.
 type ActionSpec struct {
-	// exec specifies the action should be executed by the pod exec API in a container.
+	// Specifies that the action should be executed using the pod's exec API within a container.
+	//
 	// +optional
 	Exec *ExecActionSpec `json:"exec,omitempty"`
 
-	// job specifies the action should be executed by a Kubernetes Job.
+	// Specifies that the action should be executed by a Kubernetes Job.
+	//
 	// +optional
 	Job *JobActionSpec `json:"job,omitempty"`
 }
@@ -146,61 +197,73 @@ type ActionSpec struct {
 // ExecActionSpec is an action that uses the pod exec API to execute a command in a container
 // in a pod.
 type ExecActionSpec struct {
-	// container is the container in the pod where the command should be executed.
-	// If not specified, the pod's first container is used.
+	// Specifies the container within the pod where the command should be executed.
+	// If not specified, the first container in the pod is used by default.
+	//
 	// +optional
 	Container string `json:"container,omitempty"`
 
-	// Command is the command and arguments to execute.
+	// Defines the command and arguments to be executed.
+	//
 	// +kubebuilder:validation:MinItems=1
 	Command []string `json:"command"`
 
-	// OnError specifies how should behave if it encounters an error executing this action.
+	// Indicates how to behave if an error is encountered during the execution of this action.
+	//
 	// +optional
 	// +kubebuilder:default=Fail
 	OnError ActionErrorMode `json:"onError,omitempty"`
 
-	// Timeout defines the maximum amount of time should wait for the hook to complete before
+	// Specifies the maximum duration to wait for the hook to complete before
 	// considering the execution a failure.
+	//
 	// +optional
 	Timeout metav1.Duration `json:"timeout,omitempty"`
 }
 
 // JobActionSpec is an action that creates a Kubernetes Job to execute a command.
 type JobActionSpec struct {
-	// image specifies the image of backup container.
-	// +kubebuilder:validation:Required
-	Image string `json:"image"`
+	BaseJobActionSpec `json:",inline"`
 
-	// runOnTargetPodNode specifies whether to run the job workload on the
-	// target pod node. If backup container should mount the target pod's
-	// volumes, this field should be set to true. otherwise the target pod's
-	// volumes will be ignored.
+	// Determines whether to run the job workload on the target pod node.
+	// If the backup container needs to mount the target pod's volumes, this field
+	// should be set to true. Otherwise, the target pod's volumes will be ignored.
+	//
 	// +optional
 	// +kubebuilder:default=false
 	RunOnTargetPodNode *bool `json:"runOnTargetPodNode,omitempty"`
 
-	// command specifies the commands to back up the volume data.
-	// +kubebuilder:validation:Required
-	Command []string `json:"command"`
-
-	// OnError specifies how should behave if it encounters an error executing
-	// this action.
+	// Indicates how to behave if an error is encountered during the execution of this action.
+	//
 	// +optional
 	// +kubebuilder:default=Fail
 	OnError ActionErrorMode `json:"onError,omitempty"`
 }
 
-// ActionErrorMode defines how should treat an error from an action.
-// TODO: now, only support Fail mode, will support Continue mode in the future.
+// BaseJobActionSpec is an action that creates a Kubernetes Job to execute a command.
+type BaseJobActionSpec struct {
+	// Specifies the image of the backup container.
+	//
+	// +kubebuilder:validation:Required
+	Image string `json:"image"`
+
+	// Defines the commands to back up the volume data.
+	//
+	// +kubebuilder:validation:Required
+	Command []string `json:"command"`
+}
+
+// ActionErrorMode defines how to handle an error from an action.
+// Currently, only the Fail mode is supported, but the Continue mode will be supported in the future.
+//
 // +kubebuilder:validation:Enum=Continue;Fail
 type ActionErrorMode string
 
 const (
-	// ActionErrorModeContinue means that an error from an action is acceptable.
+	// ActionErrorModeContinue signifies that an error from an action is acceptable and can be ignored.
 	ActionErrorModeContinue ActionErrorMode = "Continue"
 
-	// ActionErrorModeFail means that an error from an action is problematic.
+	// ActionErrorModeFail signifies that an error from an action is problematic and should be treated as a failure.
 	ActionErrorModeFail ActionErrorMode = "Fail"
 )
 

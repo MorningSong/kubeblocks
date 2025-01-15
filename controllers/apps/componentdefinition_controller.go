@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -21,21 +21,33 @@ package apps
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"reflect"
+	"slices"
 	"strings"
 
-	"golang.org/x/exp/slices"
+	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/rand"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
+	appsv1 "github.com/apecloud/kubeblocks/apis/apps/v1"
+	appsconfig "github.com/apecloud/kubeblocks/controllers/apps/configuration"
 	"github.com/apecloud/kubeblocks/pkg/constant"
+	"github.com/apecloud/kubeblocks/pkg/controller/component"
 	intctrlutil "github.com/apecloud/kubeblocks/pkg/controllerutil"
+)
+
+const (
+	componentDefinitionFinalizerName = "componentdefinition.kubeblocks.io/finalizer"
+	immutableHashAnnotationKey       = "apps.kubeblocks.io/immutable-hash"
 )
 
 // ComponentDefinitionReconciler reconciles a ComponentDefinition object
@@ -45,9 +57,9 @@ type ComponentDefinitionReconciler struct {
 	Recorder record.EventRecorder
 }
 
-//+kubebuilder:rbac:groups=apps.kubeblocks.io,resources=componentdefinitions,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=apps.kubeblocks.io,resources=componentdefinitions/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups=apps.kubeblocks.io,resources=componentdefinitions/finalizers,verbs=update
+// +kubebuilder:rbac:groups=apps.kubeblocks.io,resources=componentdefinitions,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps.kubeblocks.io,resources=componentdefinitions/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=apps.kubeblocks.io,resources=componentdefinitions/finalizers,verbs=update
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -64,9 +76,13 @@ func (r *ComponentDefinitionReconciler) Reconcile(ctx context.Context, req ctrl.
 
 	rctx.Log.V(1).Info("reconcile", "component", req.NamespacedName)
 
-	cmpd := &appsv1alpha1.ComponentDefinition{}
+	cmpd := &appsv1.ComponentDefinition{}
 	if err := r.Client.Get(rctx.Ctx, rctx.Req.NamespacedName, cmpd); err != nil {
 		return intctrlutil.CheckedRequeueWithError(err, rctx.Log, "")
+	}
+
+	if !intctrlutil.ObjectAPIVersionSupported(cmpd) {
+		return intctrlutil.Reconciled()
 	}
 
 	return r.reconcile(rctx, cmpd)
@@ -74,20 +90,20 @@ func (r *ComponentDefinitionReconciler) Reconcile(ctx context.Context, req ctrl.
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *ComponentDefinitionReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&appsv1alpha1.ComponentDefinition{}).
+	return intctrlutil.NewControllerManagedBy(mgr).
+		For(&appsv1.ComponentDefinition{}).
 		Complete(r)
 }
 
 func (r *ComponentDefinitionReconciler) reconcile(rctx intctrlutil.RequestCtx,
-	cmpd *appsv1alpha1.ComponentDefinition) (ctrl.Result, error) {
-	res, err := intctrlutil.HandleCRDeletion(rctx, r, cmpd, constant.DBComponentDefinitionFinalizerName, r.deletionHandler(rctx, cmpd))
+	cmpd *appsv1.ComponentDefinition) (ctrl.Result, error) {
+	res, err := intctrlutil.HandleCRDeletion(rctx, r, cmpd, componentDefinitionFinalizerName, r.deletionHandler(rctx, cmpd))
 	if res != nil {
 		return *res, err
 	}
 
 	if cmpd.Status.ObservedGeneration == cmpd.Generation &&
-		slices.Contains([]appsv1alpha1.Phase{appsv1alpha1.AvailablePhase}, cmpd.Status.Phase) {
+		slices.Contains([]appsv1.Phase{appsv1.AvailablePhase}, cmpd.Status.Phase) {
 		return intctrlutil.Reconciled()
 	}
 
@@ -98,8 +114,11 @@ func (r *ComponentDefinitionReconciler) reconcile(rctx intctrlutil.RequestCtx,
 		return intctrlutil.CheckedRequeueWithError(err, rctx.Log, "")
 	}
 
-	err = r.available(r.Client, rctx, cmpd)
-	if err != nil {
+	if err = r.immutableHash(r.Client, rctx, cmpd); err != nil {
+		return intctrlutil.CheckedRequeueWithError(err, rctx.Log, "")
+	}
+
+	if err = r.available(r.Client, rctx, cmpd); err != nil {
 		return intctrlutil.CheckedRequeueWithError(err, rctx.Log, "")
 	}
 
@@ -109,32 +128,35 @@ func (r *ComponentDefinitionReconciler) reconcile(rctx intctrlutil.RequestCtx,
 }
 
 func (r *ComponentDefinitionReconciler) deletionHandler(rctx intctrlutil.RequestCtx,
-	cmpd *appsv1alpha1.ComponentDefinition) func() (*ctrl.Result, error) {
+	cmpd *appsv1.ComponentDefinition) func() (*ctrl.Result, error) {
 	return func() (*ctrl.Result, error) {
 		recordEvent := func() {
 			r.Recorder.Event(cmpd, corev1.EventTypeWarning, constant.ReasonRefCRUnavailable,
-				"cannot be deleted because of existing referencing Cluster.")
+				"cannot be deleted because of existing referencing Component.")
 		}
 		if res, err := intctrlutil.ValidateReferenceCR(rctx, r.Client, cmpd, constant.ComponentDefinitionLabelKey,
-			recordEvent, &appsv1alpha1.ClusterList{}); res != nil || err != nil {
+			recordEvent, &appsv1.ComponentList{}); res != nil || err != nil {
 			return res, err
+		}
+		if err := appsconfig.DeleteConfigMapFinalizer(r.Client, rctx, cmpd); err != nil {
+			return &ctrl.Result{}, err
 		}
 		return nil, nil
 	}
 }
 
 func (r *ComponentDefinitionReconciler) available(cli client.Client, rctx intctrlutil.RequestCtx,
-	cmpd *appsv1alpha1.ComponentDefinition) error {
-	return r.status(cli, rctx, cmpd, appsv1alpha1.AvailablePhase, "")
+	cmpd *appsv1.ComponentDefinition) error {
+	return r.status(cli, rctx, cmpd, appsv1.AvailablePhase, "")
 }
 
 func (r *ComponentDefinitionReconciler) unavailable(cli client.Client, rctx intctrlutil.RequestCtx,
-	cmpd *appsv1alpha1.ComponentDefinition, err error) error {
-	return r.status(cli, rctx, cmpd, appsv1alpha1.UnavailablePhase, err.Error())
+	cmpd *appsv1.ComponentDefinition, err error) error {
+	return r.status(cli, rctx, cmpd, appsv1.UnavailablePhase, err.Error())
 }
 
 func (r *ComponentDefinitionReconciler) status(cli client.Client, rctx intctrlutil.RequestCtx,
-	cmpd *appsv1alpha1.ComponentDefinition, phase appsv1alpha1.Phase, message string) error {
+	cmpd *appsv1.ComponentDefinition, phase appsv1.Phase, message string) error {
 	patch := client.MergeFrom(cmpd.DeepCopy())
 	cmpd.Status.ObservedGeneration = cmpd.Generation
 	cmpd.Status.Phase = phase
@@ -142,63 +164,151 @@ func (r *ComponentDefinitionReconciler) status(cli client.Client, rctx intctrlut
 	return cli.Status().Patch(rctx.Ctx, cmpd, patch)
 }
 
+func (r *ComponentDefinitionReconciler) immutableHash(cli client.Client, rctx intctrlutil.RequestCtx,
+	cmpd *appsv1.ComponentDefinition) error {
+	if r.skipImmutableCheck(cmpd) {
+		return nil
+	}
+
+	if cmpd.Annotations != nil {
+		_, ok := cmpd.Annotations[immutableHashAnnotationKey]
+		if ok {
+			return nil
+		}
+	}
+
+	patch := client.MergeFrom(cmpd.DeepCopy())
+	if cmpd.Annotations == nil {
+		cmpd.Annotations = map[string]string{}
+	}
+	cmpd.Annotations[immutableHashAnnotationKey], _ = r.cmpdHash(cmpd)
+	return cli.Patch(rctx.Ctx, cmpd, patch)
+}
+
 func (r *ComponentDefinitionReconciler) validate(cli client.Client, rctx intctrlutil.RequestCtx,
-	cmpd *appsv1alpha1.ComponentDefinition) error {
-	for _, validator := range []func(client.Client, intctrlutil.RequestCtx, *appsv1alpha1.ComponentDefinition) error{
+	cmpd *appsv1.ComponentDefinition) error {
+	for _, validator := range []func(client.Client, intctrlutil.RequestCtx, *appsv1.ComponentDefinition) error{
+		r.validateServiceVersion,
+		r.validateLabels,
 		r.validateRuntime,
 		r.validateVars,
 		r.validateVolumes,
+		r.validateHostNetwork,
 		r.validateServices,
 		r.validateConfigs,
-		r.validateScripts,
-		r.validatePolicyRules,
-		r.validateLabels,
-		r.validateReplicasLimit,
 		r.validateSystemAccounts,
+		r.validateReplicasLimit,
+		r.validateAvailable,
 		r.validateReplicaRoles,
+		r.validatePolicyRules,
 		r.validateLifecycleActions,
-		r.validateComponentDefRef,
 	} {
 		if err := validator(cli, rctx, cmpd); err != nil {
 			return err
 		}
 	}
+	return r.immutableCheck(cmpd)
+}
+
+func (r *ComponentDefinitionReconciler) validateServiceVersion(cli client.Client, rctx intctrlutil.RequestCtx,
+	cmpd *appsv1.ComponentDefinition) error {
+	return validateServiceVersion(cmpd.Spec.ServiceVersion)
+}
+
+func (r *ComponentDefinitionReconciler) validateLabels(cli client.Client, rctx intctrlutil.RequestCtx,
+	cmpd *appsv1.ComponentDefinition) error {
 	return nil
 }
 
 func (r *ComponentDefinitionReconciler) validateRuntime(cli client.Client, rctx intctrlutil.RequestCtx,
-	cmpd *appsv1alpha1.ComponentDefinition) error {
+	cmpd *appsv1.ComponentDefinition) error {
 	return nil
 }
 
 func (r *ComponentDefinitionReconciler) validateVars(cli client.Client, rctx intctrlutil.RequestCtx,
-	cmpd *appsv1alpha1.ComponentDefinition) error {
+	cmpd *appsv1.ComponentDefinition) error {
+	if !checkUniqueItemWithValue(cmpd.Spec.Vars, "Name", nil) {
+		return fmt.Errorf("duplicate names of component vars are not allowed")
+	}
+
+	// validate the reference to component definition name pattern
+	var compDef string
+	for _, cVar := range cmpd.Spec.Vars {
+		if len(cVar.Value) > 0 && cVar.ValueFrom != nil {
+			return fmt.Errorf("both value and valueFrom are specified for component var: %s", cVar.Name)
+		}
+		if cVar.ValueFrom == nil {
+			continue
+		}
+		switch {
+		case cVar.ValueFrom.HostNetworkVarRef != nil:
+			compDef = cVar.ValueFrom.HostNetworkVarRef.CompDef
+		case cVar.ValueFrom.ServiceVarRef != nil:
+			compDef = cVar.ValueFrom.ServiceVarRef.CompDef
+		case cVar.ValueFrom.ServiceRefVarRef != nil:
+			compDef = cVar.ValueFrom.ServiceRefVarRef.CompDef
+		case cVar.ValueFrom.ComponentVarRef != nil:
+			compDef = cVar.ValueFrom.ComponentVarRef.CompDef
+		case cVar.ValueFrom.CredentialVarRef != nil:
+			compDef = cVar.ValueFrom.CredentialVarRef.CompDef
+		default:
+			continue
+		}
+
+		if len(compDef) == 0 {
+			continue
+		}
+		if err := component.ValidateDefNameRegexp(compDef); err != nil {
+			return errors.Wrapf(err, "invalid reference to component definition name pattern: %s", compDef)
+		}
+	}
 	return nil
 }
 
 func (r *ComponentDefinitionReconciler) validateVolumes(cli client.Client, rctx intctrlutil.RequestCtx,
-	cmpd *appsv1alpha1.ComponentDefinition) error {
+	cmpd *appsv1.ComponentDefinition) error {
 	if !checkUniqueItemWithValue(cmpd.Spec.Volumes, "Name", nil) {
 		return fmt.Errorf("duplicate volume names are not allowed")
 	}
+	return nil
+}
 
-	hasVolumeToProtect := false
-	for _, vol := range cmpd.Spec.Volumes {
-		if vol.HighWatermark > 0 && vol.HighWatermark < 100 {
-			hasVolumeToProtect = true
-			break
+func (r *ComponentDefinitionReconciler) validateHostNetwork(cli client.Client, rctx intctrlutil.RequestCtx,
+	cmpd *appsv1.ComponentDefinition) error {
+	if cmpd.Spec.HostNetwork == nil {
+		return nil
+	}
+	if !checkUniqueItemWithValue(cmpd.Spec.HostNetwork.ContainerPorts, "Container", nil) {
+		return fmt.Errorf("duplicate container of host-network are not allowed")
+	}
+
+	containerPorts := make(map[string]map[string]bool)
+	for _, cc := range [][]corev1.Container{cmpd.Spec.Runtime.InitContainers, cmpd.Spec.Runtime.Containers} {
+		for _, c := range cc {
+			ports := make(map[string]bool)
+			for _, p := range c.Ports {
+				ports[p.Name] = true
+			}
+			containerPorts[c.Name] = ports
 		}
 	}
-	if hasVolumeToProtect {
-		if cmpd.Spec.LifecycleActions == nil || cmpd.Spec.LifecycleActions.Readonly == nil || cmpd.Spec.LifecycleActions.Readwrite == nil {
-			return fmt.Errorf("the Readonly and Readwrite actions are needed to protect volumes")
+
+	for _, c := range cmpd.Spec.HostNetwork.ContainerPorts {
+		ports, ok := containerPorts[c.Container]
+		if !ok {
+			return fmt.Errorf("the container that host-network referenced is not defined: %s", c.Container)
+		}
+		for _, p := range c.Ports {
+			if _, ok = ports[p]; !ok {
+				return fmt.Errorf("the container port that host-network referenced is not defined: %s.%s", c.Container, p)
+			}
 		}
 	}
 	return nil
 }
 
 func (r *ComponentDefinitionReconciler) validateServices(cli client.Client, rctx intctrlutil.RequestCtx,
-	cmpd *appsv1alpha1.ComponentDefinition) error {
+	cmpd *appsv1.ComponentDefinition) error {
 	if !checkUniqueItemWithValue(cmpd.Spec.Services, "Name", nil) {
 		return fmt.Errorf("duplicate names of component service are not allowed")
 	}
@@ -226,48 +336,20 @@ func (r *ComponentDefinitionReconciler) validateServices(cli client.Client, rctx
 }
 
 func (r *ComponentDefinitionReconciler) validateConfigs(cli client.Client, rctx intctrlutil.RequestCtx,
-	cmpd *appsv1alpha1.ComponentDefinition) error {
-	// if err := appsconfig.ReconcileConfigSpecsForReferencedCR(r.Client, rctx, dbClusterDef); err != nil {
-	//	return intctrlutil.RequeueAfter(time.Second, reqCtx.Log, err.Error())
-	// }
-	return nil
-}
-
-func (r *ComponentDefinitionReconciler) validateScripts(cli client.Client, rctx intctrlutil.RequestCtx,
-	cmpd *appsv1alpha1.ComponentDefinition) error {
-	return nil
-}
-
-func (r *ComponentDefinitionReconciler) validatePolicyRules(cli client.Client, rctx intctrlutil.RequestCtx,
-	cmpd *appsv1alpha1.ComponentDefinition) error {
-	// TODO: how to check the acquired rules can be granted?
-	return nil
-}
-
-func (r *ComponentDefinitionReconciler) validateLabels(cli client.Client, rctx intctrlutil.RequestCtx,
-	cmpd *appsv1alpha1.ComponentDefinition) error {
-	return nil
-}
-
-func (r *ComponentDefinitionReconciler) validateReplicasLimit(cli client.Client, rctx intctrlutil.RequestCtx,
-	cmpd *appsv1alpha1.ComponentDefinition) error {
-	return nil
+	compDef *appsv1.ComponentDefinition) error {
+	return appsconfig.ReconcileConfigSpecsForReferencedCR(cli, rctx, compDef)
 }
 
 func (r *ComponentDefinitionReconciler) validateSystemAccounts(cli client.Client, rctx intctrlutil.RequestCtx,
-	cmpd *appsv1alpha1.ComponentDefinition) error {
+	cmpd *appsv1.ComponentDefinition) error {
 	for _, v := range cmpd.Spec.SystemAccounts {
-		if v.SecretRef == nil && (cmpd.Spec.LifecycleActions == nil || cmpd.Spec.LifecycleActions.AccountProvision == nil) {
+		if v.SecretRef == nil && !v.InitAccount && (cmpd.Spec.LifecycleActions == nil || cmpd.Spec.LifecycleActions.AccountProvision == nil) {
 			return fmt.Errorf(`the AccountProvision action is needed to provision system account %s`, v.Name)
 		}
 	}
 	if !checkUniqueItemWithValue(cmpd.Spec.SystemAccounts, "Name", nil) {
 		return fmt.Errorf("duplicate system accounts are not allowed")
 	}
-	if !checkUniqueItemWithValue(cmpd.Spec.SystemAccounts, "InitAccount", true) {
-		return fmt.Errorf("multiple system init accounts are not allowed")
-	}
-
 	for _, account := range cmpd.Spec.SystemAccounts {
 		if !account.InitAccount && len(account.Statement) == 0 && account.SecretRef == nil {
 			return fmt.Errorf("the Statement or SecretRef must be provided to create system account: %s", account.Name)
@@ -276,70 +358,138 @@ func (r *ComponentDefinitionReconciler) validateSystemAccounts(cli client.Client
 	return nil
 }
 
+func (r *ComponentDefinitionReconciler) validateReplicasLimit(cli client.Client, rctx intctrlutil.RequestCtx,
+	cmpd *appsv1.ComponentDefinition) error {
+	return nil
+}
+
+func (r *ComponentDefinitionReconciler) validateAvailable(cli client.Client, rctx intctrlutil.RequestCtx,
+	cmpd *appsv1.ComponentDefinition) error {
+	if cmpd.Spec.Available == nil {
+		return nil
+	}
+	if cmpd.Spec.Available.WithPhases != nil && cmpd.Spec.Available.WithProbe == nil {
+		return r.validateAvailableWithPhases(cmpd)
+	}
+	return r.validateAvailableWithProbe(cmpd)
+}
+
+func (r *ComponentDefinitionReconciler) validateAvailableWithPhases(cmpd *appsv1.ComponentDefinition) error {
+	phases := sets.New[string](strings.Split(strings.ToLower(*cmpd.Spec.Available.WithPhases), ",")...)
+	supported := sets.New[string](
+		strings.ToLower(string(appsv1.CreatingComponentPhase)),
+		strings.ToLower(string(appsv1.RunningComponentPhase)),
+		strings.ToLower(string(appsv1.UpdatingComponentPhase)),
+		strings.ToLower(string(appsv1.StartingComponentPhase)),
+		strings.ToLower(string(appsv1.StoppingComponentPhase)),
+		strings.ToLower(string(appsv1.StoppedComponentPhase)),
+		strings.ToLower(string(appsv1.DeletingComponentPhase)),
+		strings.ToLower(string(appsv1.FailedComponentPhase)),
+	)
+	result := phases.Difference(supported)
+	if result.Len() > 0 {
+		return fmt.Errorf("unsupported phases are specified: %s", strings.Join(sets.List(result), ","))
+	}
+	return nil
+}
+
+func (r *ComponentDefinitionReconciler) validateAvailableWithProbe(cmpd *appsv1.ComponentDefinition) error {
+	withProbe := cmpd.Spec.Available.WithProbe
+	if withProbe == nil {
+		return nil
+	}
+	if cmpd.Spec.LifecycleActions == nil || cmpd.Spec.LifecycleActions.AvailableProbe == nil {
+		return fmt.Errorf("the available probe is required to be defined when withProbe of available is specified")
+	}
+	return nil
+}
+
 func (r *ComponentDefinitionReconciler) validateReplicaRoles(cli client.Client, reqCtx intctrlutil.RequestCtx,
-	cmpd *appsv1alpha1.ComponentDefinition) error {
+	cmpd *appsv1.ComponentDefinition) error {
 	if !checkUniqueItemWithValue(cmpd.Spec.Roles, "Name", nil) {
 		return fmt.Errorf("duplicate replica roles are not allowed")
 	}
 	return nil
 }
 
-func (r *ComponentDefinitionReconciler) validateLifecycleActions(cli client.Client, reqCtx intctrlutil.RequestCtx, cmpd *appsv1alpha1.ComponentDefinition) error {
-	if err := r.validateLifecycleActionBuiltInHandlers(cmpd.Spec.LifecycleActions); err != nil {
-		return err
-	}
+func (r *ComponentDefinitionReconciler) validatePolicyRules(cli client.Client, rctx intctrlutil.RequestCtx,
+	cmpd *appsv1.ComponentDefinition) error {
+	// TODO: how to check the acquired rules can be granted?
 	return nil
 }
 
-func (r *ComponentDefinitionReconciler) validateLifecycleActionBuiltInHandlers(lifecycleActions *appsv1alpha1.ComponentLifecycleActions) error {
-	if lifecycleActions == nil {
+func (r *ComponentDefinitionReconciler) validateLifecycleActions(cli client.Client, reqCtx intctrlutil.RequestCtx,
+	cmpd *appsv1.ComponentDefinition) error {
+	return nil
+}
+
+func (r *ComponentDefinitionReconciler) immutableCheck(cmpd *appsv1.ComponentDefinition) error {
+	if r.skipImmutableCheck(cmpd) {
 		return nil
 	}
 
-	builtInHandlerMap := make(map[appsv1alpha1.BuiltinActionHandlerType]bool)
-	supportedBuiltInHandlers := getBuiltinActionHandlers()
-
-	if lifecycleActions.RoleProbe != nil && lifecycleActions.RoleProbe.BuiltinHandler != nil {
-		if !slices.Contains(supportedBuiltInHandlers, *lifecycleActions.RoleProbe.BuiltinHandler) {
-			return fmt.Errorf("the builtin handler %s is not supported", *lifecycleActions.RoleProbe.BuiltinHandler)
-		}
-		builtInHandlerMap[*lifecycleActions.RoleProbe.BuiltinHandler] = true
+	newHashValue, err := r.cmpdHash(cmpd)
+	if err != nil {
+		return err
 	}
 
-	actions := []struct {
-		LifeCycleActionHandlers *appsv1alpha1.LifecycleActionHandler
-	}{
-		{lifecycleActions.PostProvision},
-		{lifecycleActions.PreTerminate},
-		{lifecycleActions.MemberJoin},
-		{lifecycleActions.MemberLeave},
-		{lifecycleActions.Readonly},
-		{lifecycleActions.Readwrite},
-		{lifecycleActions.DataPopulate},
-		{lifecycleActions.DataAssemble},
-		{lifecycleActions.Reconfigure},
-		{lifecycleActions.AccountProvision},
+	hashValue, ok := cmpd.Annotations[immutableHashAnnotationKey]
+	if ok && hashValue != newHashValue {
+		// TODO: fields been updated
+		return fmt.Errorf("immutable fields can't be updated")
 	}
-
-	for _, action := range actions {
-		if action.LifeCycleActionHandlers != nil && action.LifeCycleActionHandlers.BuiltinHandler != nil {
-			if !slices.Contains(supportedBuiltInHandlers, *lifecycleActions.RoleProbe.BuiltinHandler) {
-				return fmt.Errorf("the builtin handler %s is not supported", *lifecycleActions.RoleProbe.BuiltinHandler)
-			}
-			builtInHandlerMap[*lifecycleActions.RoleProbe.BuiltinHandler] = true
-		}
-	}
-
-	if len(builtInHandlerMap) > 1 {
-		return fmt.Errorf("the builtin handler within the same lifecycle actions should be consistent")
-	}
-
 	return nil
 }
 
-func (r *ComponentDefinitionReconciler) validateComponentDefRef(cli client.Client, reqCtx intctrlutil.RequestCtx,
-	cmpd *appsv1alpha1.ComponentDefinition) error {
-	return nil
+func (r *ComponentDefinitionReconciler) skipImmutableCheck(cmpd *appsv1.ComponentDefinition) bool {
+	if cmpd.Annotations == nil {
+		return false
+	}
+	skip, ok := cmpd.Annotations[constant.SkipImmutableCheckAnnotationKey]
+	return ok && strings.ToLower(skip) == "true"
+}
+
+func (r *ComponentDefinitionReconciler) cmpdHash(cmpd *appsv1.ComponentDefinition) (string, error) {
+	objCopy := cmpd.DeepCopy()
+
+	// reset all mutable fields
+	objCopy.Spec.Provider = ""
+	objCopy.Spec.Description = ""
+	objCopy.Spec.Exporter = nil
+	objCopy.Spec.PodManagementPolicy = nil
+	objCopy.Spec.MinReadySeconds = 0
+
+	// TODO: bpt
+
+	data, err := json.Marshal(objCopy.Spec)
+	if err != nil {
+		return "", err
+	}
+	hash := fnv.New32a()
+	hash.Write(data)
+	return rand.SafeEncodeString(fmt.Sprintf("%d", hash.Sum32())), nil
+}
+
+// listCompDefinitionsWithPattern returns all component definitions whose names match the given pattern
+func listCompDefinitionsWithPattern(ctx context.Context, cli client.Reader, name string) ([]*appsv1.ComponentDefinition, error) {
+	compDefList := &appsv1.ComponentDefinitionList{}
+	if err := cli.List(ctx, compDefList); err != nil {
+		return nil, err
+	}
+	compDefsFullyMatched := make([]*appsv1.ComponentDefinition, 0)
+	compDefsPatternMatched := make([]*appsv1.ComponentDefinition, 0)
+	for i, item := range compDefList.Items {
+		if item.Name == name {
+			compDefsFullyMatched = append(compDefsFullyMatched, &compDefList.Items[i])
+		}
+		if component.PrefixOrRegexMatched(item.Name, name) {
+			compDefsPatternMatched = append(compDefsPatternMatched, &compDefList.Items[i])
+		}
+	}
+	if len(compDefsFullyMatched) > 0 {
+		return compDefsFullyMatched, nil
+	}
+	return compDefsPatternMatched, nil
 }
 
 func checkUniqueItemWithValue(slice any, fieldName string, val any) bool {
@@ -374,18 +524,4 @@ func checkUniqueItemWithValue(slice any, fieldName string, val any) bool {
 		lookupTable[fieldValue] = true
 	}
 	return true
-}
-
-func getBuiltinActionHandlers() []appsv1alpha1.BuiltinActionHandlerType {
-	return []appsv1alpha1.BuiltinActionHandlerType{
-		appsv1alpha1.MySQLBuiltinActionHandler,
-		appsv1alpha1.WeSQLBuiltinActionHandler,
-		appsv1alpha1.RedisBuiltinActionHandler,
-		appsv1alpha1.MongoDBBuiltinActionHandler,
-		appsv1alpha1.ETCDBuiltinActionHandler,
-		appsv1alpha1.PostgresqlBuiltinActionHandler,
-		appsv1alpha1.OfficialPostgresqlBuiltinActionHandler,
-		appsv1alpha1.ApeCloudPostgresqlBuiltinActionHandler,
-		appsv1alpha1.PolarDBXBuiltinActionHandler,
-	}
 }

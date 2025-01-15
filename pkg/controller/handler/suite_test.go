@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -28,7 +28,7 @@ import (
 
 	"github.com/golang/mock/gomock"
 
-	workloads "github.com/apecloud/kubeblocks/apis/workloads/v1alpha1"
+	workloads "github.com/apecloud/kubeblocks/apis/workloads/v1"
 	"github.com/apecloud/kubeblocks/pkg/controller/model"
 	testutil "github.com/apecloud/kubeblocks/pkg/testutil/k8s"
 	"github.com/apecloud/kubeblocks/pkg/testutil/k8s/mocks"

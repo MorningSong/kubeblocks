@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,27 +28,18 @@ import (
 
 type AppsV1alpha1Interface interface {
 	RESTClient() rest.Interface
-	BackupPolicyTemplatesGetter
 	ClustersGetter
 	ClusterDefinitionsGetter
-	ClusterVersionsGetter
 	ComponentsGetter
-	ComponentClassDefinitionsGetter
 	ComponentDefinitionsGetter
-	ComponentResourceConstraintsGetter
+	ComponentVersionsGetter
 	ConfigConstraintsGetter
-	OpsDefinitionsGetter
-	OpsRequestsGetter
 	ServiceDescriptorsGetter
 }
 
 // AppsV1alpha1Client is used to interact with features provided by the apps.kubeblocks.io group.
 type AppsV1alpha1Client struct {
 	restClient rest.Interface
-}
-
-func (c *AppsV1alpha1Client) BackupPolicyTemplates() BackupPolicyTemplateInterface {
-	return newBackupPolicyTemplates(c)
 }
 
 func (c *AppsV1alpha1Client) Clusters(namespace string) ClusterInterface {
@@ -59,36 +50,20 @@ func (c *AppsV1alpha1Client) ClusterDefinitions() ClusterDefinitionInterface {
 	return newClusterDefinitions(c)
 }
 
-func (c *AppsV1alpha1Client) ClusterVersions() ClusterVersionInterface {
-	return newClusterVersions(c)
-}
-
 func (c *AppsV1alpha1Client) Components(namespace string) ComponentInterface {
 	return newComponents(c, namespace)
-}
-
-func (c *AppsV1alpha1Client) ComponentClassDefinitions() ComponentClassDefinitionInterface {
-	return newComponentClassDefinitions(c)
 }
 
 func (c *AppsV1alpha1Client) ComponentDefinitions() ComponentDefinitionInterface {
 	return newComponentDefinitions(c)
 }
 
-func (c *AppsV1alpha1Client) ComponentResourceConstraints() ComponentResourceConstraintInterface {
-	return newComponentResourceConstraints(c)
+func (c *AppsV1alpha1Client) ComponentVersions() ComponentVersionInterface {
+	return newComponentVersions(c)
 }
 
 func (c *AppsV1alpha1Client) ConfigConstraints() ConfigConstraintInterface {
 	return newConfigConstraints(c)
-}
-
-func (c *AppsV1alpha1Client) OpsDefinitions() OpsDefinitionInterface {
-	return newOpsDefinitions(c)
-}
-
-func (c *AppsV1alpha1Client) OpsRequests(namespace string) OpsRequestInterface {
-	return newOpsRequests(c, namespace)
 }
 
 func (c *AppsV1alpha1Client) ServiceDescriptors(namespace string) ServiceDescriptorInterface {

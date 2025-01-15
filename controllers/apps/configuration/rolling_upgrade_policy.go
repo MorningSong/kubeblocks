@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -27,7 +27,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
-	"github.com/apecloud/kubeblocks/pkg/configuration/util"
 	"github.com/apecloud/kubeblocks/pkg/constant"
 	podutil "github.com/apecloud/kubeblocks/pkg/controllerutil"
 	viper "github.com/apecloud/kubeblocks/pkg/viperx"
@@ -51,7 +50,7 @@ func init() {
 }
 
 func (r *rollingUpgradePolicy) Upgrade(params reconfigureParams) (ReturnedStatus, error) {
-	return performRollingUpgrade(params, GetRSMRollingUpgradeFuncs())
+	return performRollingUpgrade(params, GetInstanceSetRollingUpgradeFuncs())
 }
 
 func (r *rollingUpgradePolicy) GetPolicyName() string {
@@ -63,10 +62,7 @@ func canPerformUpgrade(pods []corev1.Pod, params reconfigureParams) bool {
 	// TODO(xingran&zhangtao): review this logic
 	return len(pods) == target
 
-	/*	if params.WorkloadType() == appsv1alpha1.Consensus {
-			params.Ctx.Log.Info(fmt.Sprintf("wait for consensus component is ready, %d pods are ready, and the expected replicas is %d.", len(pods), target))
-			return false
-		}
+	/*
 		if len(pods) < target {
 			params.Ctx.Log.Info(fmt.Sprintf("component pods are not all ready, %d pods are ready, which is less than the expected replicas(%d).", len(pods), target))
 			return false
@@ -154,7 +150,7 @@ func markDynamicCursor(pods []corev1.Pod, podsStats *componentPodStats, configKe
 		podsStats.updated[pod.Name] = pod
 	}
 
-	podWindows.begin = util.Max[int](podWindows.end-int(rollingReplicas), 0)
+	podWindows.begin = max(podWindows.end-int(rollingReplicas), 0)
 	for i := podWindows.begin; i < podWindows.end; i++ {
 		pod := &pods[i]
 		if podutil.IsMatchConfigVersion(pod, configKey, currentVersion) {

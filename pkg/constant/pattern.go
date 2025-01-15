@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -21,6 +21,7 @@ package constant
 
 import (
 	"fmt"
+	"strings"
 )
 
 // GenerateClusterComponentName generates the cluster component name.
@@ -30,7 +31,8 @@ func GenerateClusterComponentName(clusterName, compName string) string {
 
 // GenerateAccountSecretName generates the secret name of system accounts.
 func GenerateAccountSecretName(clusterName, compName, name string) string {
-	return fmt.Sprintf("%s-%s-account-%s", clusterName, compName, name)
+	replacedName := strings.ReplaceAll(name, "_", "-")
+	return fmt.Sprintf("%s-%s-account-%s", clusterName, compName, replacedName)
 }
 
 // GenerateClusterServiceName generates the service name for cluster.
@@ -39,14 +41,6 @@ func GenerateClusterServiceName(clusterName, svcName string) string {
 		return fmt.Sprintf("%s-%s", clusterName, svcName)
 	}
 	return clusterName
-}
-
-// GenerateClusterHeadlessServiceName generates the headless service name for cluster.
-func GenerateClusterHeadlessServiceName(clusterName, svcName string) string {
-	if len(svcName) > 0 {
-		return fmt.Sprintf("%s-%s-headless", clusterName, svcName)
-	}
-	return fmt.Sprintf("%s-headless", clusterName)
 }
 
 // GenerateComponentServiceName generates the service name for component.
@@ -75,31 +69,23 @@ func GenerateDefaultComponentHeadlessServiceName(clusterName, compName string) s
 	return GenerateComponentHeadlessServiceName(clusterName, compName, "")
 }
 
-// GenerateDefaultConnCredential generates the default connection credential name for cluster.
-// TODO: deprecated, will be removed later.
-func GenerateDefaultConnCredential(clusterName string) string {
-	return fmt.Sprintf("%s-conn-credential", clusterName)
-}
-
 // GenerateClusterComponentEnvPattern generates cluster and component pattern
 func GenerateClusterComponentEnvPattern(clusterName, compName string) string {
-	return fmt.Sprintf("%s-%s-env", clusterName, compName)
+	return GetCompEnvCMName(fmt.Sprintf("%s-%s", clusterName, compName))
 }
 
-// GenerateDefaultCompServiceAccountPattern generates default component service account pattern
-// fullCompName is the full name of component with clusterName prefix
-func GenerateDefaultCompServiceAccountPattern(fullCompName string) string {
-	return fmt.Sprintf("%s-%s", KBLowerPrefix, fullCompName)
+func GetCompEnvCMName(compObjName string) string {
+	return fmt.Sprintf("%s-env", compObjName)
 }
 
-// GenerateRSMNamePattern generates rsm name pattern
-func GenerateRSMNamePattern(clusterName, compName string) string {
+// GenerateDefaultServiceAccountName generates default service account name for a cluster.
+func GenerateDefaultServiceAccountName(name string) string {
+	return fmt.Sprintf("%s-%s", KBLowerPrefix, name)
+}
+
+// GenerateWorkloadNamePattern generates the workload name pattern
+func GenerateWorkloadNamePattern(clusterName, compName string) string {
 	return fmt.Sprintf("%s-%s", clusterName, compName)
-}
-
-// GenerateRSMServiceNamePattern generates rsm name pattern
-func GenerateRSMServiceNamePattern(rsmName string) string {
-	return fmt.Sprintf("%s-headless", rsmName)
 }
 
 // GeneratePodName generates the connection credential name for component.
@@ -107,13 +93,7 @@ func GeneratePodName(clusterName, compName string, ordinal int) string {
 	return fmt.Sprintf("%s-%d", GenerateClusterComponentName(clusterName, compName), ordinal)
 }
 
-// GeneratePodSubDomain generates the connection credential name for component.
-func GeneratePodSubDomain(clusterName, compName string) string {
-	return GenerateDefaultComponentHeadlessServiceName(clusterName, compName)
-}
-
-// GeneratePodFQDN generates the connection credential name for component.
-func GeneratePodFQDN(namespace, clusterName, compName string, ordinal int) string {
-	return fmt.Sprintf("%s.%s.%s.svc",
-		GeneratePodName(clusterName, compName, ordinal), GeneratePodSubDomain(clusterName, compName), namespace)
+// GenerateShardingNamePrefix generates sharding name prefix.
+func GenerateShardingNamePrefix(shardingName string) string {
+	return fmt.Sprintf("%s-", shardingName)
 }

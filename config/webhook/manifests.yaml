@@ -10,19 +10,39 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
-      path: /mutate-workloads-kubeblocks-io-v1alpha1-replicatedstatemachine
+      path: /mutate-apps-kubeblocks-io-v1-clusterdefinition
   failurePolicy: Fail
-  name: mreplicatedstatemachine.kb.io
+  name: mclusterdefinition.kb.io
   rules:
   - apiGroups:
-    - workloads.kubeblocks.io
+    - apps.kubeblocks.io
     apiVersions:
-    - v1alpha1
+    - v1
     operations:
     - CREATE
     - UPDATE
     resources:
-    - replicatedstatemachines
+    - clusterdefinitions
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /mutate-apps-kubeblocks-io-v1-servicedescriptor
+  failurePolicy: Fail
+  name: mservicedescriptor.kb.io
+  rules:
+  - apiGroups:
+    - apps.kubeblocks.io
+    apiVersions:
+    - v1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - servicedescriptors
   sideEffects: None
 - admissionReviewVersions:
   - v1
@@ -43,46 +63,6 @@ webhooks:
     - UPDATE
     resources:
     - clusterdefinitions
-  sideEffects: None
-- admissionReviewVersions:
-  - v1
-  clientConfig:
-    service:
-      name: webhook-service
-      namespace: system
-      path: /mutate-apps-kubeblocks-io-v1alpha1-component
-  failurePolicy: Fail
-  name: mcomponent.kb.io
-  rules:
-  - apiGroups:
-    - apps.kubeblocks.io
-    apiVersions:
-    - v1alpha1
-    operations:
-    - CREATE
-    - UPDATE
-    resources:
-    - components
-  sideEffects: None
-- admissionReviewVersions:
-  - v1
-  clientConfig:
-    service:
-      name: webhook-service
-      namespace: system
-      path: /mutate-apps-kubeblocks-io-v1alpha1-componentdefinition
-  failurePolicy: Fail
-  name: mcomponentdefinition.kb.io
-  rules:
-  - apiGroups:
-    - apps.kubeblocks.io
-    apiVersions:
-    - v1alpha1
-    operations:
-    - CREATE
-    - UPDATE
-    resources:
-    - componentdefinitions
   sideEffects: None
 - admissionReviewVersions:
   - v1
@@ -116,19 +96,19 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
-      path: /validate-workloads-kubeblocks-io-v1alpha1-replicatedstatemachine
+      path: /validate-apps-kubeblocks-io-v1-clusterdefinition
   failurePolicy: Fail
-  name: vreplicatedstatemachine.kb.io
+  name: vclusterdefinition.kb.io
   rules:
   - apiGroups:
-    - workloads.kubeblocks.io
+    - apps.kubeblocks.io
     apiVersions:
-    - v1alpha1
+    - v1
     operations:
     - CREATE
     - UPDATE
     resources:
-    - replicatedstatemachines
+    - clusterdefinitions
   sideEffects: None
 - admissionReviewVersions:
   - v1
@@ -136,19 +116,19 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
-      path: /validate-apps-kubeblocks-io-v1alpha1-cluster
+      path: /validate-apps-kubeblocks-io-v1-servicedescriptor
   failurePolicy: Fail
-  name: vcluster.kb.io
+  name: vservicedescriptor.kb.io
   rules:
   - apiGroups:
     - apps.kubeblocks.io
     apiVersions:
-    - v1alpha1
+    - v1
     operations:
     - CREATE
     - UPDATE
     resources:
-    - clusters
+    - servicedescriptors
   sideEffects: None
 - admissionReviewVersions:
   - v1
@@ -169,86 +149,6 @@ webhooks:
     - UPDATE
     resources:
     - clusterdefinitions
-  sideEffects: None
-- admissionReviewVersions:
-  - v1
-  clientConfig:
-    service:
-      name: webhook-service
-      namespace: system
-      path: /validate-apps-kubeblocks-io-v1alpha1-clusterversion
-  failurePolicy: Fail
-  name: vclusterversion.kb.io
-  rules:
-  - apiGroups:
-    - apps.kubeblocks.io
-    apiVersions:
-    - v1alpha1
-    operations:
-    - CREATE
-    - UPDATE
-    resources:
-    - clusterversions
-  sideEffects: None
-- admissionReviewVersions:
-  - v1
-  clientConfig:
-    service:
-      name: webhook-service
-      namespace: system
-      path: /validate-apps-kubeblocks-io-v1alpha1-component
-  failurePolicy: Fail
-  name: vcomponent.kb.io
-  rules:
-  - apiGroups:
-    - apps.kubeblocks.io
-    apiVersions:
-    - v1alpha1
-    operations:
-    - CREATE
-    - UPDATE
-    resources:
-    - components
-  sideEffects: None
-- admissionReviewVersions:
-  - v1
-  clientConfig:
-    service:
-      name: webhook-service
-      namespace: system
-      path: /validate-apps-kubeblocks-io-v1alpha1-componentdefinition
-  failurePolicy: Fail
-  name: vcomponentdefinition.kb.io
-  rules:
-  - apiGroups:
-    - apps.kubeblocks.io
-    apiVersions:
-    - v1alpha1
-    operations:
-    - CREATE
-    - UPDATE
-    resources:
-    - componentdefinitions
-  sideEffects: None
-- admissionReviewVersions:
-  - v1
-  clientConfig:
-    service:
-      name: webhook-service
-      namespace: system
-      path: /validate-apps-kubeblocks-io-v1alpha1-opsrequest
-  failurePolicy: Fail
-  name: vopsrequest.kb.io
-  rules:
-  - apiGroups:
-    - apps.kubeblocks.io
-    apiVersions:
-    - v1alpha1
-    operations:
-    - CREATE
-    - UPDATE
-    resources:
-    - opsrequests
   sideEffects: None
 - admissionReviewVersions:
   - v1

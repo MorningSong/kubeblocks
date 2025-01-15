@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -38,6 +38,10 @@ type BackupPolicyListerExpansion interface{}
 // BackupPolicyNamespaceLister.
 type BackupPolicyNamespaceListerExpansion interface{}
 
+// BackupPolicyTemplateListerExpansion allows custom methods to be added to
+// BackupPolicyTemplateLister.
+type BackupPolicyTemplateListerExpansion interface{}
+
 // BackupRepoListerExpansion allows custom methods to be added to
 // BackupRepoLister.
 type BackupRepoListerExpansion interface{}
@@ -57,3 +61,7 @@ type RestoreListerExpansion interface{}
 // RestoreNamespaceListerExpansion allows custom methods to be added to
 // RestoreNamespaceLister.
 type RestoreNamespaceListerExpansion interface{}
+
+// StorageProviderListerExpansion allows custom methods to be added to
+// StorageProviderLister.
+type StorageProviderListerExpansion interface{}

@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -29,9 +29,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
+	appsv1 "github.com/apecloud/kubeblocks/apis/apps/v1"
+	appsv1beta1 "github.com/apecloud/kubeblocks/apis/apps/v1beta1"
 	cfgcore "github.com/apecloud/kubeblocks/pkg/configuration/core"
 	"github.com/apecloud/kubeblocks/pkg/controller/component"
+	"github.com/apecloud/kubeblocks/pkg/controller/render"
 	testapps "github.com/apecloud/kubeblocks/pkg/testutil/apps"
 	testutil "github.com/apecloud/kubeblocks/pkg/testutil/k8s"
 )
@@ -55,6 +57,9 @@ xengine_block_cache_size=307
 xengine_row_cache_size=102
 max_connections=666
 `
+
+	testString := "// this is a test string"
+
 	const (
 		baseCMName    = "base-cm"
 		updatedCMName = "updated-cm"
@@ -62,13 +67,14 @@ max_connections=666
 		testConfigSpecName = "test-config"
 		testClusterName    = "test-cluster"
 		testConfigName     = "my.cnf"
+		testConfig2Name    = "test.txt"
 	)
 
 	var (
 		mockClient          *testutil.K8sClientMockHelper
-		templateBuilder     *configTemplateBuilder
-		configSpec          appsv1alpha1.ComponentConfigSpec
-		configConstraintObj *appsv1alpha1.ConfigConstraint
+		templateBuilder     render.TemplateRender
+		configSpec          appsv1.ComponentConfigSpec
+		configConstraintObj *appsv1beta1.ConfigConstraint
 
 		baseCMObject    *corev1.ConfigMap
 		updatedCMObject *corev1.ConfigMap
@@ -78,15 +84,17 @@ max_connections=666
 		mockClient = testutil.NewK8sMockClient()
 		configConstraintObj = testapps.CheckedCreateCustomizedObj(&testCtx,
 			"resources/mysql-config-constraint.yaml",
-			&appsv1alpha1.ConfigConstraint{})
+			&appsv1beta1.ConfigConstraint{})
 		baseCMObject = &corev1.ConfigMap{
 			Data: map[string]string{
-				testConfigName: baseConfig,
+				testConfigName:  baseConfig,
+				testConfig2Name: testString,
 			},
 		}
 		updatedCMObject = &corev1.ConfigMap{
 			Data: map[string]string{
-				testConfigName: extendConfig,
+				testConfigName:  extendConfig,
+				testConfig2Name: testString,
 			},
 		}
 		baseCMObject.SetName(baseCMName)
@@ -94,26 +102,32 @@ max_connections=666
 		updatedCMObject.SetName(updatedCMName)
 		updatedCMObject.SetNamespace("default")
 
-		configSpec = appsv1alpha1.ComponentConfigSpec{
-			ComponentTemplateSpec: appsv1alpha1.ComponentTemplateSpec{
+		configSpec = appsv1.ComponentConfigSpec{
+			ComponentTemplateSpec: appsv1.ComponentTemplateSpec{
 				Name:        testConfigSpecName,
 				TemplateRef: baseCMObject.GetName(),
 				Namespace:   "default",
 			},
+			Keys:                []string{"my.cnf"},
 			ConfigConstraintRef: configConstraintObj.GetName(),
 		}
 
-		templateBuilder = newTemplateBuilder(
-			testClusterName,
-			"default",
-			&appsv1alpha1.Cluster{
+		templateBuilder = render.NewTemplateBuilder(&render.ReconcileCtx{
+			ResourceCtx: &render.ResourceCtx{
+				Context:     ctx,
+				Client:      mockClient.Client(),
+				ClusterName: testClusterName,
+				Namespace:   "default",
+			},
+			Cluster: &appsv1.Cluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testClusterName,
 					Namespace: "default",
 				},
-			}, nil, nil)
-		Expect(templateBuilder.injectBuiltInObjectsAndFunctions(
-			&corev1.PodSpec{}, nil, &component.SynthesizedComponent{}, nil)).Should(Succeed())
+			},
+			SynthesizedComponent: &component.SynthesizedComponent{},
+			PodSpec:              nil,
+		})
 
 		mockClient.MockGetMethod(testutil.WithGetReturned(testutil.WithConstructSimpleGetResult([]client.Object{
 			baseCMObject,
@@ -128,20 +142,19 @@ max_connections=666
 
 	Context("with patch Merge", func() {
 		It("mergerConfigTemplate patch policy", func() {
-			importedTemplate := &appsv1alpha1.LegacyRenderedTemplateSpec{
-				ConfigTemplateExtension: appsv1alpha1.ConfigTemplateExtension{
-					Namespace: "default",
-					// Name:        configSpec.Name,
-					TemplateRef: updatedCMObject.GetName(),
-					Policy:      appsv1alpha1.PatchPolicy,
-				},
+			importedTemplate := appsv1.ConfigTemplateExtension{
+				Namespace: "default",
+				// Name:        configSpec.Name,
+				TemplateRef: updatedCMObject.GetName(),
+				Policy:      appsv1.PatchPolicy,
 			}
 
 			tmpCM := baseCMObject.DeepCopy()
 			mergedData, err := mergerConfigTemplate(importedTemplate, templateBuilder, configSpec, tmpCM.Data, ctx, mockClient.Client())
 			Expect(err).To(Succeed())
+			Expect(mergedData).Should(HaveLen(2))
 
-			configReaders, err := cfgcore.LoadRawConfigObject(mergedData, configConstraintObj.Spec.FormatterConfig, configSpec.Keys)
+			configReaders, err := cfgcore.LoadRawConfigObject(mergedData, configConstraintObj.Spec.FileFormatConfig, configSpec.Keys)
 			Expect(err).Should(Succeed())
 			Expect(configReaders).Should(HaveLen(1))
 			configObject := configReaders[testConfigName]
@@ -157,20 +170,19 @@ max_connections=666
 
 	Context("with replace Merge", func() {
 		It("test mergerConfigTemplate replace policy", func() {
-			importedTemplate := &appsv1alpha1.LegacyRenderedTemplateSpec{
-				ConfigTemplateExtension: appsv1alpha1.ConfigTemplateExtension{
-					Namespace:   "default",
-					TemplateRef: updatedCMObject.GetName(),
-					Policy:      appsv1alpha1.ReplacePolicy,
-				},
+			importedTemplate := appsv1.ConfigTemplateExtension{
+				Namespace:   "default",
+				TemplateRef: updatedCMObject.GetName(),
+				Policy:      appsv1.ReplacePolicy,
 			}
 
 			tmpCM := baseCMObject.DeepCopy()
 			mergedData, err := mergerConfigTemplate(importedTemplate, templateBuilder, configSpec, tmpCM.Data, ctx, mockClient.Client())
 			Expect(err).Should(Succeed())
+			Expect(mergedData).Should(HaveLen(2))
 			Expect(reflect.DeepEqual(mergedData, updatedCMObject.Data)).Should(BeTrue())
 
-			configReaders, err := cfgcore.LoadRawConfigObject(mergedData, configConstraintObj.Spec.FormatterConfig, configSpec.Keys)
+			configReaders, err := cfgcore.LoadRawConfigObject(mergedData, configConstraintObj.Spec.FileFormatConfig, configSpec.Keys)
 			Expect(err).Should(Succeed())
 			Expect(configReaders).Should(HaveLen(1))
 			configObject := configReaders[testConfigName]
@@ -183,12 +195,10 @@ max_connections=666
 
 	Context("with only add Merge", func() {
 		It("test mergerConfigTemplate add policy", func() {
-			importedTemplate := &appsv1alpha1.LegacyRenderedTemplateSpec{
-				ConfigTemplateExtension: appsv1alpha1.ConfigTemplateExtension{
-					Namespace:   "default",
-					TemplateRef: updatedCMObject.GetName(),
-					Policy:      appsv1alpha1.OnlyAddPolicy,
-				},
+			importedTemplate := appsv1.ConfigTemplateExtension{
+				Namespace:   "default",
+				TemplateRef: updatedCMObject.GetName(),
+				Policy:      appsv1.OnlyAddPolicy,
 			}
 
 			tmpCM := baseCMObject.DeepCopy()
@@ -199,12 +209,10 @@ max_connections=666
 
 	Context("with none Merge", func() {
 		It("test mergerConfigTemplate none policy", func() {
-			importedTemplate := &appsv1alpha1.LegacyRenderedTemplateSpec{
-				ConfigTemplateExtension: appsv1alpha1.ConfigTemplateExtension{
-					Namespace:   "default",
-					TemplateRef: updatedCMObject.GetName(),
-					Policy:      appsv1alpha1.NoneMergePolicy,
-				},
+			importedTemplate := appsv1.ConfigTemplateExtension{
+				Namespace:   "default",
+				TemplateRef: updatedCMObject.GetName(),
+				Policy:      appsv1.NoneMergePolicy,
 			}
 
 			tmpCM := baseCMObject.DeepCopy()
@@ -216,12 +224,10 @@ max_connections=666
 
 	Context("failed test", func() {
 		It("test mergerConfigTemplate function", func() {
-			importedTemplate := &appsv1alpha1.LegacyRenderedTemplateSpec{
-				ConfigTemplateExtension: appsv1alpha1.ConfigTemplateExtension{
-					Namespace:   "default",
-					TemplateRef: updatedCMObject.GetName(),
-					Policy:      "",
-				},
+			importedTemplate := appsv1.ConfigTemplateExtension{
+				Namespace:   "default",
+				TemplateRef: updatedCMObject.GetName(),
+				Policy:      "",
 			}
 
 			tmpCM := baseCMObject.DeepCopy()
@@ -230,12 +236,10 @@ max_connections=666
 		})
 
 		It("not configconstraint", func() {
-			importedTemplate := &appsv1alpha1.LegacyRenderedTemplateSpec{
-				ConfigTemplateExtension: appsv1alpha1.ConfigTemplateExtension{
-					Namespace:   "default",
-					TemplateRef: updatedCMObject.GetName(),
-					Policy:      "none",
-				},
+			importedTemplate := appsv1.ConfigTemplateExtension{
+				Namespace:   "default",
+				TemplateRef: updatedCMObject.GetName(),
+				Policy:      "none",
 			}
 
 			tmpCM := baseCMObject.DeepCopy()
@@ -246,12 +250,10 @@ max_connections=666
 		})
 
 		It("not formatter", func() {
-			importedTemplate := &appsv1alpha1.LegacyRenderedTemplateSpec{
-				ConfigTemplateExtension: appsv1alpha1.ConfigTemplateExtension{
-					Namespace:   "default",
-					TemplateRef: updatedCMObject.GetName(),
-					Policy:      "none",
-				},
+			importedTemplate := appsv1.ConfigTemplateExtension{
+				Namespace:   "default",
+				TemplateRef: updatedCMObject.GetName(),
+				Policy:      "none",
 			}
 
 			tmpCM := baseCMObject.DeepCopy()

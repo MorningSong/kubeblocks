@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,6 +22,9 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 )
 
 // Phase defines the BackupPolicy and ActionSet CR .status.phase
@@ -38,16 +41,21 @@ func (p Phase) IsAvailable() bool {
 	return p == AvailablePhase
 }
 
-// BackupRepoPhase defines phases for BackupRepo CR.
+// BackupRepoPhase denotes different stages for the `BackupRepo`.
+//
 // +enum
 // +kubebuilder:validation:Enum={PreChecking,Failed,Ready,Deleting}
 type BackupRepoPhase string
 
 const (
+	// BackupRepoPreChecking indicates the backup repository is being pre-checked.
 	BackupRepoPreChecking BackupRepoPhase = "PreChecking"
-	BackupRepoFailed      BackupRepoPhase = "Failed"
-	BackupRepoReady       BackupRepoPhase = "Ready"
-	BackupRepoDeleting    BackupRepoPhase = "Deleting"
+	// BackupRepoFailed indicates the pre-check has been failed.
+	BackupRepoFailed BackupRepoPhase = "Failed"
+	// BackupRepoReady indicates the backup repository is ready for use.
+	BackupRepoReady BackupRepoPhase = "Ready"
+	// BackupRepoDeleting indicates the backup repository is being deleted.
+	BackupRepoDeleting BackupRepoPhase = "Deleting"
 )
 
 // RetentionPeriod represents a duration in the format "1y2mo3w4d5h6m", where
@@ -211,9 +219,10 @@ const (
 
 // VolumeClaimRestorePolicy defines restore policy for persistent volume claim.
 // Supported policies are as follows:
+//
 // 1. Parallel: parallel recovery of persistent volume claim.
-// 2. Serial: restore the persistent volume claim in sequence, and wait until the
-// previous persistent volume claim is restored before restoring a new one.
+// 2. Serial: restore the persistent volume claim in sequence, and wait until the previous persistent volume claim is restored before restoring a new one.
+//
 // +enum
 // +kubebuilder:validation:Enum={Parallel,Serial}
 type VolumeClaimRestorePolicy string
@@ -222,3 +231,59 @@ const (
 	VolumeClaimRestorePolicyParallel VolumeClaimRestorePolicy = "Parallel"
 	VolumeClaimRestorePolicySerial   VolumeClaimRestorePolicy = "Serial"
 )
+
+type DataRestorePolicy string
+
+const (
+	OneToOneRestorePolicy  DataRestorePolicy = "OneToOne"
+	OneToManyRestorePolicy DataRestorePolicy = "OneToMany"
+)
+
+const (
+	DefaultEncryptionAlgorithm = "AES-256-CFB"
+)
+
+// EncryptionConfig defines the parameters for encrypting backup data.
+type EncryptionConfig struct {
+	// Specifies the encryption algorithm. Currently supported algorithms are:
+	//
+	// - AES-128-CFB
+	// - AES-192-CFB
+	// - AES-256-CFB
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:default=AES-256-CFB
+	// +kubebuilder:validation:Enum={AES-128-CFB,AES-192-CFB,AES-256-CFB}
+	Algorithm string `json:"algorithm"`
+
+	// Selects the key of a secret in the current namespace, the value of the secret
+	// is used as the encryption key.
+	//
+	// +kubebuilder:validation:Required
+	PassPhraseSecretKeyRef *corev1.SecretKeySelector `json:"passPhraseSecretKeyRef"`
+}
+
+type ActionSetParametersSchema struct {
+	// Defines the schema for parameters using the OpenAPI v3.
+	// The supported property types include:
+	// - string
+	// - number
+	// - integer
+	// - array: Note that only items of string type are supported.
+	// +kubebuilder:validation:Schemaless
+	// +kubebuilder:validation:Type=object
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +k8s:conversion-gen=false
+	// +optional
+	OpenAPIV3Schema *apiextensionsv1.JSONSchemaProps `json:"openAPIV3Schema,omitempty"`
+}
+
+type ParameterPair struct {
+	// Represents the name of the parameter.
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+
+	// Represents the parameter values.
+	// +kubebuilder:validation:Required
+	Value string `json:"value"`
+}

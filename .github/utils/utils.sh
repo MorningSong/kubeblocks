@@ -511,6 +511,9 @@ get_trigger_mode() {
             pkg/cli/cmd/*)
                 add_trigger_mode "[cli][test]"
             ;;
+            apis/*)
+                add_trigger_mode "[apis][test]"
+            ;;
             *)
                 add_trigger_mode "[test]"
             ;;

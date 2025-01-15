@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -25,14 +25,13 @@ import (
 	"strconv"
 	"strings"
 
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
+	appsv1 "github.com/apecloud/kubeblocks/apis/apps/v1"
+	"github.com/apecloud/kubeblocks/pkg/common"
 	"github.com/apecloud/kubeblocks/pkg/constant"
-	"github.com/apecloud/kubeblocks/pkg/controller/apiconversion"
 	"github.com/apecloud/kubeblocks/pkg/controller/builder"
-	intctrlutil "github.com/apecloud/kubeblocks/pkg/controllerutil"
+	"github.com/apecloud/kubeblocks/pkg/controller/scheduling"
 )
 
 func FullName(clusterName, compName string) string {
@@ -47,173 +46,133 @@ func ShortName(clusterName, compName string) (string, error) {
 	return name, nil
 }
 
-func GetClusterName(comp *appsv1alpha1.Component) (string, error) {
+func GetClusterName(comp *appsv1.Component) (string, error) {
 	return getCompLabelValue(comp, constant.AppInstanceLabelKey)
 }
 
-func GetClusterUID(comp *appsv1alpha1.Component) (string, error) {
-	return getCompLabelValue(comp, constant.KBAppClusterUIDLabelKey)
+func GetClusterUID(comp *appsv1.Component) (string, error) {
+	return getCompAnnotationValue(comp, constant.KBAppClusterUIDKey)
 }
 
 // BuildComponent builds a new Component object from cluster component spec and definition.
-func BuildComponent(cluster *appsv1alpha1.Cluster, clusterCompSpec *appsv1alpha1.ClusterComponentSpec) (*appsv1alpha1.Component, error) {
-	compName := FullName(cluster.Name, clusterCompSpec.Name)
-	affinities := BuildAffinity(cluster, clusterCompSpec)
-	tolerations, err := BuildTolerations(cluster, clusterCompSpec)
+func BuildComponent(cluster *appsv1.Cluster, compSpec *appsv1.ClusterComponentSpec, labels, annotations map[string]string) (*appsv1.Component, error) {
+	schedulingPolicy, err := scheduling.BuildSchedulingPolicy(cluster, compSpec)
 	if err != nil {
 		return nil, err
 	}
-	compBuilder := builder.NewComponentBuilder(cluster.Namespace, compName, clusterCompSpec.ComponentDef).
+	compBuilder := builder.NewComponentBuilder(cluster.Namespace, FullName(cluster.Name, compSpec.Name), compSpec.ComponentDef).
 		AddAnnotations(constant.KubeBlocksGenerationKey, strconv.FormatInt(cluster.Generation, 10)).
-		AddLabelsInMap(constant.GetComponentWellKnownLabels(cluster.Name, clusterCompSpec.Name)).
-		AddLabels(constant.KBAppClusterUIDLabelKey, string(cluster.UID)).
-		SetAffinity(affinities).
-		SetTolerations(tolerations).
-		SetReplicas(clusterCompSpec.Replicas).
-		SetResources(clusterCompSpec.Resources).
-		SetMonitor(clusterCompSpec.Monitor).
-		SetServiceAccountName(clusterCompSpec.ServiceAccountName).
-		SetVolumeClaimTemplates(clusterCompSpec.VolumeClaimTemplates).
-		SetUpdateStrategy(clusterCompSpec.UpdateStrategy).
-		SetEnabledLogs(clusterCompSpec.EnabledLogs).
-		SetServiceRefs(clusterCompSpec.ServiceRefs).
-		SetClassRef(clusterCompSpec.ClassDefRef).
-		SetTLSConfig(clusterCompSpec.TLS, clusterCompSpec.Issuer).
-		SetNodes(clusterCompSpec.Nodes).
-		SetInstances(clusterCompSpec.Instances).
-		SetTransformPolicy(clusterCompSpec.RsmTransformPolicy)
-	// sync cluster ignore resource constraint annotation to component
-	value, ok := cluster.GetAnnotations()[constant.IgnoreResourceConstraint]
-	if ok {
-		compBuilder.AddAnnotations(constant.IgnoreResourceConstraint, value)
-	}
+		AddAnnotations(constant.CRDAPIVersionAnnotationKey, appsv1.GroupVersion.String()).
+		AddAnnotations(constant.KBAppClusterUIDKey, string(cluster.UID)).
+		AddAnnotationsInMap(inheritedAnnotations(cluster)).
+		AddAnnotationsInMap(annotations). // annotations added by the cluster controller
+		AddLabelsInMap(constant.GetCompLabelsWithDef(cluster.Name, compSpec.Name, compSpec.ComponentDef, labels)).
+		SetServiceVersion(compSpec.ServiceVersion).
+		SetLabels(compSpec.Labels).
+		SetAnnotations(compSpec.Annotations).
+		SetEnv(compSpec.Env).
+		SetSchedulingPolicy(schedulingPolicy).
+		SetDisableExporter(compSpec.DisableExporter).
+		SetReplicas(compSpec.Replicas).
+		SetResources(compSpec.Resources).
+		SetServiceAccountName(compSpec.ServiceAccountName).
+		SetParallelPodManagementConcurrency(compSpec.ParallelPodManagementConcurrency).
+		SetPodUpdatePolicy(compSpec.PodUpdatePolicy).
+		SetVolumeClaimTemplates(compSpec.VolumeClaimTemplates).
+		SetVolumes(compSpec.Volumes).
+		SetServices(compSpec.Services).
+		SetConfigs(compSpec.Configs).
+		SetServiceRefs(compSpec.ServiceRefs).
+		SetTLSConfig(compSpec.TLS, compSpec.Issuer).
+		SetInstances(compSpec.Instances).
+		SetOfflineInstances(compSpec.OfflineInstances).
+		SetRuntimeClassName(cluster.Spec.RuntimeClassName).
+		SetSystemAccounts(compSpec.SystemAccounts).
+		SetStop(compSpec.Stop).
+		SetSidecars(nil)
 	return compBuilder.GetObject(), nil
 }
 
-func BuildComponentDefinition(clusterDef *appsv1alpha1.ClusterDefinition,
-	clusterVer *appsv1alpha1.ClusterVersion,
-	clusterCompSpec *appsv1alpha1.ClusterComponentSpec) (*appsv1alpha1.ComponentDefinition, error) {
-	clusterCompDef, clusterCompVer, err := getClusterCompDefAndVersion(clusterDef, clusterVer, clusterCompSpec)
-	if err != nil {
-		return nil, err
-	}
-	compDef, err := buildComponentDefinitionByConversion(clusterCompDef, clusterCompVer)
-	if err != nil {
-		return nil, err
-	}
-	return compDef, nil
-}
-
-func getOrBuildComponentDefinition(ctx context.Context, cli client.Reader,
-	clusterDef *appsv1alpha1.ClusterDefinition,
-	clusterVer *appsv1alpha1.ClusterVersion,
-	cluster *appsv1alpha1.Cluster,
-	clusterCompSpec *appsv1alpha1.ClusterComponentSpec) (*appsv1alpha1.ComponentDefinition, error) {
-	if len(cluster.Spec.ClusterDefRef) > 0 && len(clusterCompSpec.ComponentDefRef) > 0 {
-		return BuildComponentDefinition(clusterDef, clusterVer, clusterCompSpec)
-	}
-	if len(clusterCompSpec.ComponentDef) > 0 {
-		compDef := &appsv1alpha1.ComponentDefinition{}
-		if err := cli.Get(ctx, types.NamespacedName{Name: clusterCompSpec.ComponentDef}, compDef); err != nil {
-			return nil, err
-		}
-		return compDef, nil
-	}
-	return nil, fmt.Errorf("the component definition is not provided")
-}
-
-func getClusterReferencedResources(ctx context.Context, cli client.Reader,
-	cluster *appsv1alpha1.Cluster) (*appsv1alpha1.ClusterDefinition, *appsv1alpha1.ClusterVersion, error) {
-	var (
-		clusterDef *appsv1alpha1.ClusterDefinition
-		clusterVer *appsv1alpha1.ClusterVersion
-	)
-	if len(cluster.Spec.ClusterDefRef) > 0 {
-		clusterDef = &appsv1alpha1.ClusterDefinition{}
-		if err := cli.Get(ctx, types.NamespacedName{Name: cluster.Spec.ClusterDefRef}, clusterDef); err != nil {
-			return nil, nil, err
+func inheritedAnnotations(cluster *appsv1.Cluster) map[string]string {
+	m := map[string]string{}
+	annotations := cluster.Annotations
+	if annotations != nil {
+		for _, key := range constant.InheritedAnnotations() {
+			if val, ok := annotations[key]; ok {
+				m[key] = val
+			}
 		}
 	}
-	if len(cluster.Spec.ClusterVersionRef) > 0 {
-		clusterVer = &appsv1alpha1.ClusterVersion{}
-		if err := cli.Get(ctx, types.NamespacedName{Name: cluster.Spec.ClusterVersionRef}, clusterVer); err != nil {
-			return nil, nil, err
-		}
-	}
-	if clusterDef == nil {
-		if len(cluster.Spec.ClusterDefRef) == 0 {
-			return nil, nil, fmt.Errorf("cluster definition is needed for generated component")
-		} else {
-			return nil, nil, fmt.Errorf("referenced cluster definition is not found: %s", cluster.Spec.ClusterDefRef)
-		}
-	}
-	return clusterDef, clusterVer, nil
+	return m
 }
 
-func getClusterCompDefAndVersion(clusterDef *appsv1alpha1.ClusterDefinition,
-	clusterVer *appsv1alpha1.ClusterVersion,
-	clusterCompSpec *appsv1alpha1.ClusterComponentSpec) (*appsv1alpha1.ClusterComponentDefinition, *appsv1alpha1.ClusterComponentVersion, error) {
-	if len(clusterCompSpec.ComponentDefRef) == 0 {
-		return nil, nil, fmt.Errorf("cluster component definition ref is empty: %s", clusterCompSpec.Name)
-	}
-	clusterCompDef := clusterDef.GetComponentDefByName(clusterCompSpec.ComponentDefRef)
-	if clusterCompDef == nil {
-		return nil, nil, fmt.Errorf("referenced cluster component definition is not defined: %s", clusterCompSpec.ComponentDefRef)
-	}
-	var clusterCompVer *appsv1alpha1.ClusterComponentVersion
-	if clusterVer != nil {
-		clusterCompVer = clusterVer.Spec.GetDefNameMappingComponents()[clusterCompSpec.ComponentDefRef]
-	}
-	return clusterCompDef, clusterCompVer, nil
+func getCompAnnotationValue(comp *appsv1.Component, annotation string) (string, error) {
+	return getCompValueFromMap(comp, comp.Annotations, "annotation", annotation)
 }
 
-func getClusterCompSpec4Component(clusterDef *appsv1alpha1.ClusterDefinition, cluster *appsv1alpha1.Cluster,
-	comp *appsv1alpha1.Component) (*appsv1alpha1.ClusterComponentSpec, error) {
-	compName, err := ShortName(cluster.Name, comp.Name)
-	if err != nil {
-		return nil, err
-	}
-	for i, spec := range cluster.Spec.ComponentSpecs {
-		if spec.Name == compName {
-			return &cluster.Spec.ComponentSpecs[i], nil
-		}
-	}
-	return apiconversion.HandleSimplifiedClusterAPI(clusterDef, cluster), nil
+func getCompLabelValue(comp *appsv1.Component, label string) (string, error) {
+	return getCompValueFromMap(comp, comp.Labels, "label", label)
 }
 
-func getCompLabelValue(comp *appsv1alpha1.Component, label string) (string, error) {
-	if comp.Labels == nil {
-		return "", fmt.Errorf("required label %s is not provided, component: %s", label, comp.GetName())
+func getCompValueFromMap(comp *appsv1.Component, m map[string]string, tp string, key string) (string, error) {
+	if m == nil {
+		return "", fmt.Errorf("required %s %s is not provided, component: %s", tp, key, comp.GetName())
 	}
-	val, ok := comp.Labels[label]
+	val, ok := m[key]
 	if !ok {
-		return "", fmt.Errorf("required label %s is not provided, component: %s", label, comp.GetName())
+		return "", fmt.Errorf("required %s %s is not provided, component: %s", tp, key, comp.GetName())
 	}
 	return val, nil
 }
 
-// GetComponentDefName gets the name of referenced component definition.
-func GetComponentDefName(cluster *appsv1alpha1.Cluster, componentName string) string {
-	for _, component := range cluster.Spec.ComponentSpecs {
-		if componentName == component.Name {
-			return component.ComponentDef
-		}
-	}
-	return ""
-}
-
-// GetCompDefinition gets the component definition by component name.
-func GetCompDefinition(reqCtx intctrlutil.RequestCtx,
-	cli client.Client,
-	cluster *appsv1alpha1.Cluster,
-	compName string) (*appsv1alpha1.ComponentDefinition, error) {
-	compDefName := GetComponentDefName(cluster, compName)
-	if len(compDefName) == 0 {
-		return nil, intctrlutil.NewNotFound(`can not found component definition by the component name "%s"`, compName)
-	}
-	compDef := &appsv1alpha1.ComponentDefinition{}
-	if err := cli.Get(reqCtx.Ctx, client.ObjectKey{Name: compDefName}, compDef); err != nil {
+// GetCompDefByName gets the component definition by component definition name.
+func GetCompDefByName(ctx context.Context, cli client.Reader, compDefName string) (*appsv1.ComponentDefinition, error) {
+	compDef := &appsv1.ComponentDefinition{}
+	if err := cli.Get(ctx, client.ObjectKey{Name: compDefName}, compDef); err != nil {
 		return nil, err
 	}
 	return compDef, nil
+}
+
+func GetComponentByName(ctx context.Context, cli client.Reader, namespace, fullCompName string) (*appsv1.Component, error) {
+	comp := &appsv1.Component{}
+	if err := cli.Get(ctx, client.ObjectKey{Name: fullCompName, Namespace: namespace}, comp); err != nil {
+		return nil, err
+	}
+	return comp, nil
+}
+
+func GetCompNCompDefByName(ctx context.Context, cli client.Reader, namespace, fullCompName string) (*appsv1.Component, *appsv1.ComponentDefinition, error) {
+	comp, err := GetComponentByName(ctx, cli, namespace, fullCompName)
+	if err != nil {
+		return nil, nil, err
+	}
+	compDef, err := GetCompDefByName(ctx, cli, comp.Spec.CompDef)
+	if err != nil {
+		return nil, nil, err
+	}
+	return comp, compDef, nil
+}
+
+func GetExporter(componentDef appsv1.ComponentDefinitionSpec) *common.Exporter {
+	if componentDef.Exporter != nil {
+		return &common.Exporter{Exporter: *componentDef.Exporter}
+	}
+	return nil
+}
+
+// GetComponentNameFromObj gets the component name from the k8s object.
+func GetComponentNameFromObj(obj client.Object) string {
+	if shardingName, ok := obj.GetLabels()[constant.KBAppShardingNameLabelKey]; ok {
+		return shardingName
+	}
+	return obj.GetLabels()[constant.KBAppComponentLabelKey]
+}
+
+// GetComponentNameLabelKey gets the component name label key.
+func GetComponentNameLabelKey(cluster *appsv1.Cluster, componentName string) string {
+	if cluster.Spec.GetShardingByName(componentName) != nil {
+		return constant.KBAppShardingNameLabelKey
+	}
+	return constant.KBAppComponentLabelKey
 }

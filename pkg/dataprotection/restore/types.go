@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -28,18 +28,21 @@ const (
 	ConditionTypeRestorePreparedData     = "PrepareData"
 	ConditionTypeReadinessProbe          = "ReadinessProbe"
 	ConditionTypeRestorePostReady        = "PostReady"
-
+	ConditionTypeRestoreCheckBackupRepo  = "CheckBackupRepo"
 	// condition reasons
-	ReasonRestoreStarting      = "RestoreStarting"
-	ReasonRestoreCompleted     = "RestoreCompleted"
-	ReasonRestoreFailed        = "RestoreFailed"
-	ReasonValidateFailed       = "ValidateFailed"
-	ReasonValidateSuccessfully = "ValidateSuccessfully"
-	ReasonProcessing           = "Processing"
-	ReasonFailed               = "Failed"
-	ReasonSucceed              = "Succeed"
-	reasonCreateRestoreJob     = "CreateRestoreJob"
-	reasonCreateRestorePVC     = "CreateRestorePVC"
+	ReasonRestoreStarting             = "RestoreStarting"
+	ReasonRestoreCompleted            = "RestoreCompleted"
+	ReasonRestoreFailed               = "RestoreFailed"
+	ReasonCheckBackupRepoFailed       = "CheckBackupRepoFailed"
+	ReasonWaitForBackupRepo           = "WaitForBackupRepo"
+	ReasonCheckBackupRepoSuccessfully = "CheckBackupRepoSuccessfully"
+	ReasonValidateFailed              = "ValidateFailed"
+	ReasonValidateSuccessfully        = "ValidateSuccessfully"
+	ReasonProcessing                  = "Processing"
+	ReasonFailed                      = "Failed"
+	ReasonSucceed                     = "Succeed"
+	reasonCreateRestoreJob            = "CreateRestoreJob"
+	reasonCreateRestorePVC            = "CreateRestorePVC"
 )
 
 // labels key
@@ -47,6 +50,11 @@ const (
 	DataProtectionRestoreLabelKey          = "dataprotection.kubeblocks.io/restore"
 	DataProtectionRestoreNamespaceLabelKey = "dataprotection.kubeblocks.io/restore-namespace"
 	DataProtectionPopulatePVCLabelKey      = "dataprotection.kubeblocks.io/populate-pvc"
+)
+
+// Annotations key
+const (
+	DataProtectionBackupExtrasLabelKey = "dataprotection.kubeblocks.io/backup-extras"
 )
 
 // env name for restore
@@ -63,4 +71,4 @@ const (
 // Restore constant
 const Restore = "restore"
 
-var defaultBackoffLimit int32 = 3
+var defaultBackoffLimit int32 = 2

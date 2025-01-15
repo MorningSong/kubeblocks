@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -20,6 +20,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 package restore
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -44,6 +45,7 @@ type restoreJobBuilder struct {
 	backupRepo         *dpv1alpha1.BackupRepo
 	buildWithRepo      bool
 	env                []corev1.EnvVar
+	envFrom            []corev1.EnvFromSource
 	commonVolumes      []corev1.Volume
 	commonVolumeMounts []corev1.VolumeMount
 	// specificVolumes should be rebuilt for each job.
@@ -57,6 +59,7 @@ type restoreJobBuilder struct {
 	nodeSelector         map[string]string
 	jobName              string
 	labels               map[string]string
+	serviceAccount       string
 }
 
 func newRestoreJobBuilder(restore *dpv1alpha1.Restore, backupSet BackupActionSet, backupRepo *dpv1alpha1.BackupRepo, stage dpv1alpha1.RestoreStage) *restoreJobBuilder {
@@ -169,44 +172,64 @@ func (r *restoreJobBuilder) addLabel(key, value string) *restoreJobBuilder {
 	return r
 }
 
+func (r *restoreJobBuilder) setServiceAccount(serviceAccount string) *restoreJobBuilder {
+	r.serviceAccount = serviceAccount
+	return r
+}
+
 func (r *restoreJobBuilder) attachBackupRepo() *restoreJobBuilder {
 	r.buildWithRepo = true
 	return r
 }
 
 // addCommonEnv adds the common envs for each restore job.
-func (r *restoreJobBuilder) addCommonEnv() *restoreJobBuilder {
-	backupName := r.backupSet.Backup.Name
+func (r *restoreJobBuilder) addCommonEnv(sourceTargetPodName string) *restoreJobBuilder {
+	backup := r.backupSet.Backup
+	backupName := backup.Name
 	// add backupName env
 	r.env = []corev1.EnvVar{{Name: dptypes.DPBackupName, Value: backupName}}
-	// add mount path env of backup dir
+	// add common env
 	filePath := r.backupSet.Backup.Status.Path
 	if filePath != "" {
-		r.env = append(r.env, corev1.EnvVar{Name: dptypes.DPBackupBasePath, Value: filePath})
-		// TODO: add continuous file path env
+		r.env = append(r.env, BackupFilePathEnv(filePath, r.restore.Spec.Backup.SourceTargetName, sourceTargetPodName)...)
+	}
+	if r.backupSet.BaseBackup != nil {
+		r.env = append(r.env, corev1.EnvVar{Name: dptypes.DPBaseBackupName, Value: r.backupSet.BaseBackup.Name})
+	}
+	if len(r.backupSet.AncestorIncrementalBackups) > 0 {
+		ancestorIncrementalBackupNames := []string{}
+		for _, backup := range r.backupSet.AncestorIncrementalBackups {
+			ancestorIncrementalBackupNames = append(ancestorIncrementalBackupNames, backup.Name)
+		}
+		r.env = append(r.env, corev1.EnvVar{Name: dptypes.DPAncestorIncrementalBackupNames, Value: strings.Join(ancestorIncrementalBackupNames, ",")})
 	}
 	// add time env
 	actionSetEnv := r.backupSet.ActionSet.Spec.Env
-	timeFormat := getTimeFormat(r.backupSet.ActionSet.Spec.Env)
-	appendTimeEnv := func(envName, envTimestampName string, targetTime *metav1.Time) {
+	timeFormat := getTimeFormat(actionSetEnv)
+	appendTimeEnv := func(envName, envTimestampName, timeZone string, targetTime *metav1.Time) {
 		if targetTime.IsZero() {
 			return
 		}
+		targetTime, _ = transformTimeWithZone(targetTime, timeZone)
 		if envName != "" {
-			r.env = append(r.env, corev1.EnvVar{Name: envName, Value: targetTime.UTC().Format(timeFormat)})
+			r.env = append(r.env, corev1.EnvVar{Name: envName, Value: targetTime.Format(timeFormat)})
 		}
 		if envTimestampName != "" {
 			r.env = append(r.env, corev1.EnvVar{Name: envTimestampName, Value: strconv.FormatInt(targetTime.Unix(), 10)})
 		}
 	}
-	appendTimeEnv(dptypes.DPBackupStopTime, "", r.backupSet.Backup.GetEndTime())
+	appendTimeEnv(dptypes.DPBackupStopTime, "", backup.GetTimeZone(), backup.GetEndTime())
 	if r.backupSet.BaseBackup != nil {
-		appendTimeEnv(DPBaseBackupStartTime, DPBaseBackupStartTimestamp, r.backupSet.BaseBackup.GetStartTime())
-		appendTimeEnv(DPBaseBackupStopTime, DPBaseBackupStopTimestamp, r.backupSet.BaseBackup.GetEndTime())
+		appendTimeEnv(DPBaseBackupStartTime, DPBaseBackupStartTimestamp, r.backupSet.BaseBackup.GetTimeZone(), r.backupSet.BaseBackup.GetStartTime())
+		appendTimeEnv(DPBaseBackupStopTime, DPBaseBackupStopTimestamp, r.backupSet.BaseBackup.GetTimeZone(), r.backupSet.BaseBackup.GetEndTime())
 	}
 	if r.restore.Spec.RestoreTime != "" {
 		restoreTime, _ := time.Parse(time.RFC3339, r.restore.Spec.RestoreTime)
-		appendTimeEnv(DPRestoreTime, DPRestoreTimestamp, &metav1.Time{Time: restoreTime})
+		appendTimeEnv(DPRestoreTime, DPRestoreTimestamp, backup.GetTimeZone(), &metav1.Time{Time: restoreTime})
+	}
+	// append restore parameters env
+	if r.restore != nil {
+		r.env = append(r.env, utils.BuildEnvByParameters(r.restore.Spec.Parameters)...)
 	}
 	// append actionSet env
 	r.env = append(r.env, actionSetEnv...)
@@ -220,7 +243,8 @@ func (r *restoreJobBuilder) addCommonEnv() *restoreJobBuilder {
 }
 
 func (r *restoreJobBuilder) addTargetPodAndCredentialEnv(pod *corev1.Pod,
-	connectionCredential *dpv1alpha1.ConnectionCredential) *restoreJobBuilder {
+	connectionCredential *dpv1alpha1.ConnectionCredential,
+	target *dpv1alpha1.BackupTarget) *restoreJobBuilder {
 	if pod == nil {
 		return r
 	}
@@ -228,9 +252,25 @@ func (r *restoreJobBuilder) addTargetPodAndCredentialEnv(pod *corev1.Pod,
 	// Note: now only add the first container envs.
 	if len(pod.Spec.Containers) != 0 {
 		env = pod.Spec.Containers[0].Env
+		r.envFrom = pod.Spec.Containers[0].EnvFrom
 	}
-	env = append(env, corev1.EnvVar{Name: dptypes.DPDBHost, Value: intctrlutil.BuildPodHostDNS(pod)})
-	if connectionCredential != nil {
+	addDBHostEnv := func() {
+		env = append(env, corev1.EnvVar{Name: dptypes.DPDBHost, Value: intctrlutil.BuildPodHostDNS(pod)})
+	}
+	addDBPortEnv := func() {
+		portEnv, err := utils.GetDPDBPortEnv(pod, target.ContainerPort)
+		if err != nil {
+			// fallback to use the first port of the pod
+			portEnv, _ = utils.GetDPDBPortEnv(pod, nil)
+		}
+		if portEnv != nil {
+			env = append(env, *portEnv)
+		}
+	}
+	if connectionCredential == nil {
+		addDBHostEnv()
+		addDBPortEnv()
+	} else {
 		appendEnvFromSecret := func(envName, keyName string) {
 			if keyName == "" {
 				return
@@ -246,9 +286,15 @@ func (r *restoreJobBuilder) addTargetPodAndCredentialEnv(pod *corev1.Pod,
 		}
 		appendEnvFromSecret(dptypes.DPDBUser, connectionCredential.UsernameKey)
 		appendEnvFromSecret(dptypes.DPDBPassword, connectionCredential.PasswordKey)
-		appendEnvFromSecret(dptypes.DPDBPort, connectionCredential.PortKey)
+		if connectionCredential.PortKey != "" {
+			appendEnvFromSecret(dptypes.DPDBPort, connectionCredential.PortKey)
+		} else {
+			addDBPortEnv()
+		}
 		if connectionCredential.HostKey != "" {
 			appendEnvFromSecret(dptypes.DPDBHost, connectionCredential.HostKey)
+		} else {
+			addDBHostEnv()
 		}
 	}
 	r.env = utils.MergeEnv(r.env, env)
@@ -295,25 +341,68 @@ func (r *restoreJobBuilder) build() *batchv1.Job {
 	}
 	r.specificVolumes = append(r.specificVolumes, r.commonVolumes...)
 	podSpec.Volumes = r.specificVolumes
+	podSpec.ServiceAccountName = r.serviceAccount
+
 	job.Spec.Template.Spec = podSpec
 	job.Spec.Template.ObjectMeta = metav1.ObjectMeta{
 		Labels: r.labels,
 	}
-	job.Spec.BackoffLimit = &defaultBackoffLimit
+	if r.restore.Spec.BackoffLimit != nil {
+		job.Spec.BackoffLimit = r.restore.Spec.BackoffLimit
+	} else {
+		job.Spec.BackoffLimit = &defaultBackoffLimit
+	}
 
 	// 2. set restore container
 	r.specificVolumeMounts = append(r.specificVolumeMounts, r.commonVolumeMounts...)
+	// expand the image value with the env variables.
+	image := common.Expand(r.image, common.MappingFuncFor(utils.CovertEnvToMap(r.env)))
 	container := corev1.Container{
-		Name:         Restore,
-		Resources:    r.restore.Spec.ContainerResources,
-		Env:          r.env,
-		VolumeMounts: r.specificVolumeMounts,
-		Command:      r.command,
-		Args:         r.args,
-		// expand the image value with the env variables.
-		Image:           common.Expand(r.image, common.MappingFuncFor(utils.CovertEnvToMap(r.env))),
+		Name:            Restore,
+		Resources:       r.restore.Spec.ContainerResources,
+		Env:             r.env,
+		EnvFrom:         r.envFrom,
+		VolumeMounts:    r.specificVolumeMounts,
+		Command:         r.command,
+		Args:            r.args,
+		Image:           intctrlutil.ReplaceImageRegistry(image),
 		ImagePullPolicy: corev1.PullIfNotPresent,
 	}
+
+	buildBackupExtrasDownward := func() {
+		extras := r.backupSet.Backup.Status.Extras
+		if len(extras) == 0 {
+			return
+		}
+		volumeName := "downward-volume"
+		if job.Spec.Template.ObjectMeta.Annotations == nil {
+			job.Spec.Template.ObjectMeta.Annotations = map[string]string{}
+		}
+		data, _ := json.Marshal(extras)
+		job.Spec.Template.ObjectMeta.Annotations[DataProtectionBackupExtrasLabelKey] = string(data)
+		job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
+			Name: volumeName,
+			VolumeSource: corev1.VolumeSource{
+				DownwardAPI: &corev1.DownwardAPIVolumeSource{
+					Items: []corev1.DownwardAPIVolumeFile{
+						{
+							Path: "status_extras",
+							FieldRef: &corev1.ObjectFieldSelector{
+								FieldPath: "metadata.annotations['" + DataProtectionBackupExtrasLabelKey + "']",
+							},
+						},
+					},
+				},
+			},
+		})
+		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+			Name:      volumeName,
+			MountPath: "/dp_downward/",
+		})
+	}
+	// downward backup.status.extras to volumes
+	buildBackupExtrasDownward()
+
 	intctrlutil.InjectZeroResourcesLimitsIfEmpty(&container)
 	job.Spec.Template.Spec.Containers = []corev1.Container{container}
 	controllerutil.AddFinalizer(job, dptypes.DataProtectionFinalizerName)
@@ -321,13 +410,15 @@ func (r *restoreJobBuilder) build() *batchv1.Job {
 	// 3. inject datasafed if needed
 	if r.buildWithRepo {
 		mountPath := "/backupdata"
-		backupPath := r.backupSet.Backup.Status.Path
+		kopiaRepoPath := r.backupSet.Backup.Status.KopiaRepoPath
+		encryptionConfig := r.backupSet.Backup.Status.EncryptionConfig
 		if r.backupRepo != nil {
-			utils.InjectDatasafed(&job.Spec.Template.Spec, r.backupRepo, mountPath, backupPath)
+			utils.InjectDatasafed(&job.Spec.Template.Spec, r.backupRepo, mountPath,
+				encryptionConfig, kopiaRepoPath)
 		} else if pvcName := r.backupSet.Backup.Status.PersistentVolumeClaimName; pvcName != "" {
 			// If the backup object was created in an old version that doesn't have the backupRepo field,
 			// use the PVC name field as a fallback.
-			utils.InjectDatasafedWithPVC(&job.Spec.Template.Spec, pvcName, mountPath, backupPath)
+			utils.InjectDatasafedWithPVC(&job.Spec.Template.Spec, pvcName, mountPath, kopiaRepoPath)
 		}
 	}
 	return job

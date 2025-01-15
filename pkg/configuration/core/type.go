@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -27,7 +27,8 @@ import (
 	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
+	appsv1 "github.com/apecloud/kubeblocks/apis/apps/v1"
+	appsv1beta1 "github.com/apecloud/kubeblocks/apis/apps/v1beta1"
 	"github.com/apecloud/kubeblocks/pkg/constant"
 )
 
@@ -42,7 +43,7 @@ const (
 
 type RawConfig struct {
 	// formatter
-	Type appsv1alpha1.CfgFileFormat
+	Type appsv1beta1.CfgFileFormat
 
 	RawData string
 }
@@ -123,7 +124,7 @@ type CfgOption struct {
 	Log  logr.Logger
 
 	// formatter
-	CfgType appsv1alpha1.CfgFileFormat
+	CfgType appsv1beta1.CfgFileFormat
 
 	// Path for CfgLocalType test
 	Path    string
@@ -162,10 +163,8 @@ func GenerateConstraintsUniqLabelKeyWithConfig(configKey string) string {
 	return GenerateUniqKeyWithConfig(constant.ConfigurationConstraintsLabelPrefixKey, configKey)
 }
 
-// GetInstanceCMName  {{statefull.Name}}-{{clusterVersion.Name}}-{{tpl.Name}}-"config"
-func GetInstanceCMName(obj client.Object, tpl *appsv1alpha1.ComponentTemplateSpec) string {
+func GetInstanceCMName(obj client.Object, tpl *appsv1.ComponentTemplateSpec) string {
 	return getInstanceCfgCMName(obj.GetName(), tpl.Name)
-	// return fmt.Sprintf("%s-%s-config", sts.GetName(), tpl.VolumeName)
 }
 
 // getInstanceCfgCMName configmap generation rule for configuration file.

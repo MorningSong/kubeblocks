@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -35,7 +35,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/apecloud/kubeblocks/pkg/controller/builder"
-	roclient "github.com/apecloud/kubeblocks/pkg/controller/client"
 	"github.com/apecloud/kubeblocks/pkg/controller/graph"
 	testutil "github.com/apecloud/kubeblocks/pkg/testutil/k8s"
 )
@@ -53,7 +52,7 @@ var _ = Describe("transform utils test", func() {
 			Expect(err).ShouldNot(BeNil())
 			Expect(err.Error()).Should(ContainSubstring("root vertex not found"))
 
-			root := builder.NewStatefulSetBuilder(namespace, name).GetObject()
+			root := builder.NewInstanceSetBuilder(namespace, name).GetObject()
 			obj0 := builder.NewPodBuilder(namespace, name+"-0").GetObject()
 			obj1 := builder.NewPodBuilder(namespace, name+"-1").GetObject()
 			obj2 := builder.NewPodBuilder(namespace, name+"-2").GetObject()
@@ -70,10 +69,10 @@ var _ = Describe("transform utils test", func() {
 
 	Context("IsOwnerOf function", func() {
 		It("should work well", func() {
-			ownerAPIVersion := "apps/v1"
-			ownerKind := "StatefulSet"
+			ownerAPIVersion := "workloads.kubeblocks.io/v1"
+			ownerKind := "InstanceSet"
 			objectName := name + "-0"
-			owner := builder.NewStatefulSetBuilder(namespace, name).GetObject()
+			owner := builder.NewInstanceSetBuilder(namespace, name).GetObject()
 			object := builder.NewPodBuilder(namespace, objectName).
 				SetOwnerReferences(ownerAPIVersion, ownerKind, owner).
 				GetObject()
@@ -125,7 +124,7 @@ var _ = Describe("transform utils test", func() {
 			controller, k8sMock := testutil.SetupK8sMock()
 			defer controller.Finish()
 
-			root := builder.NewStatefulSetBuilder(namespace, name).GetObject()
+			root := builder.NewInstanceSetBuilder(namespace, name).GetObject()
 			obj0 := builder.NewPodBuilder(namespace, name+"-0").GetObject()
 			obj1 := builder.NewPodBuilder(namespace, name+"-1").GetObject()
 			obj2 := builder.NewPodBuilder(namespace, name+"-2").GetObject()
@@ -169,7 +168,7 @@ func (t *testTransCtx) GetContext() context.Context {
 	return t.Context
 }
 
-func (t *testTransCtx) GetClient() roclient.ReadonlyClient {
+func (t *testTransCtx) GetClient() client.Reader {
 	return t.GraphClient
 }
 

@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -38,15 +38,36 @@ const (
 	datasafedConfigMountPath = "/etc/datasafed"
 )
 
-func InjectDatasafed(podSpec *corev1.PodSpec, repo *dpv1alpha1.BackupRepo, repoVolumeMountPath string, backupPath string) {
+func InjectDatasafed(podSpec *corev1.PodSpec, repo *dpv1alpha1.BackupRepo, repoVolumeMountPath string,
+	encryptionConfig *dpv1alpha1.EncryptionConfig, kopiaRepoPath string) {
 	if repo.AccessByMount() {
-		InjectDatasafedWithPVC(podSpec, repo.Status.BackupPVCName, repoVolumeMountPath, backupPath)
+		InjectDatasafedWithPVC(podSpec, repo.Status.BackupPVCName, repoVolumeMountPath, kopiaRepoPath)
 	} else if repo.AccessByTool() {
-		InjectDatasafedWithConfig(podSpec, repo.Status.ToolConfigSecretName, backupPath)
+		InjectDatasafedWithConfig(podSpec, repo.Status.ToolConfigSecretName, kopiaRepoPath)
 	}
+	injectEncryptionEnvs(podSpec, encryptionConfig)
 }
 
-func InjectDatasafedWithPVC(podSpec *corev1.PodSpec, pvcName string, mountPath string, backupPath string) {
+func injectEncryptionEnvs(podSpec *corev1.PodSpec, encryptionConfig *dpv1alpha1.EncryptionConfig) {
+	if encryptionConfig == nil {
+		return
+	}
+	envs := []corev1.EnvVar{
+		{
+			Name:  dptypes.DPDatasafedEncryptionAlgorithm,
+			Value: encryptionConfig.Algorithm,
+		},
+		{
+			Name: dptypes.DPDatasafedEncryptionPassPhrase,
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: encryptionConfig.PassPhraseSecretKeyRef,
+			},
+		},
+	}
+	injectElements(podSpec, nil, nil, envs)
+}
+
+func InjectDatasafedWithPVC(podSpec *corev1.PodSpec, pvcName string, mountPath string, kopiaRepoPath string) {
 	volumeName := "dp-backup-data"
 	volume := corev1.Volume{
 		Name: volumeName,
@@ -67,11 +88,17 @@ func InjectDatasafedWithPVC(podSpec *corev1.PodSpec, pvcName string, mountPath s
 			Value: mountPath,
 		},
 	}
+	if kopiaRepoPath != "" {
+		envs = append(envs, corev1.EnvVar{
+			Name:  dptypes.DPDatasafedKopiaRepoRoot,
+			Value: kopiaRepoPath,
+		})
+	}
 	injectElements(podSpec, toSlice(volume), toSlice(volumeMount), envs)
 	injectDatasafedInstaller(podSpec)
 }
 
-func InjectDatasafedWithConfig(podSpec *corev1.PodSpec, configSecretName string, backupPath string) {
+func InjectDatasafedWithConfig(podSpec *corev1.PodSpec, configSecretName string, kopiaRepoPath string) {
 	volumeName := "dp-datasafed-config"
 	volume := corev1.Volume{
 		Name: volumeName,
@@ -86,7 +113,14 @@ func InjectDatasafedWithConfig(podSpec *corev1.PodSpec, configSecretName string,
 		ReadOnly:  true,
 		MountPath: datasafedConfigMountPath,
 	}
-	injectElements(podSpec, toSlice(volume), toSlice(volumeMount), nil)
+	var envs []corev1.EnvVar
+	if kopiaRepoPath != "" {
+		envs = append(envs, corev1.EnvVar{
+			Name:  dptypes.DPDatasafedKopiaRepoRoot,
+			Value: kopiaRepoPath,
+		})
+	}
+	injectElements(podSpec, toSlice(volume), toSlice(volumeMount), envs)
 	injectDatasafedInstaller(podSpec)
 }
 
@@ -114,7 +148,7 @@ func injectDatasafedInstaller(podSpec *corev1.PodSpec) {
 	}
 	initContainer := corev1.Container{
 		Name:            "dp-copy-datasafed",
-		Image:           datasafedImage,
+		Image:           intctrlutil.ReplaceImageRegistry(datasafedImage),
 		ImagePullPolicy: corev1.PullPolicy(viper.GetString(constant.KBImagePullPolicy)),
 		Command:         []string{"/bin/sh", "-c", fmt.Sprintf("/scripts/install-datasafed.sh %s", datasafedBinMountPath)},
 		VolumeMounts:    []corev1.VolumeMount{sharedVolumeMount},

@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -34,17 +34,17 @@ type TestClient struct {
 }
 
 // NewTestClient returns a set of ready-to-use API clients.
-func NewTestClient(kubecontext string) (TestClient, error) {
-	return InitTestClient(kubecontext)
+func NewTestClient() (TestClient, error) {
+	return InitTestClient()
 }
 
 // InitTestClient inits different type clients
-func InitTestClient(kubecontext string) (TestClient, error) {
+func InitTestClient() (TestClient, error) {
 	config, err := client.LoadConfig()
 	if err != nil {
 		return TestClient{}, err
 	}
-	f := client.NewFactory("e2e", kubecontext, config)
+	f := client.NewFactory("e2e", config)
 	clientGo, err := f.KubeClient()
 	if err != nil {
 		return TestClient{}, err

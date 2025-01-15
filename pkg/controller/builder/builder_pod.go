@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -34,6 +34,11 @@ func NewPodBuilder(namespace, name string) *PodBuilder {
 	return builder
 }
 
+func (builder *PodBuilder) SetPodSpec(podSpec corev1.PodSpec) *PodBuilder {
+	builder.get().Spec = podSpec
+	return builder
+}
+
 func (builder *PodBuilder) SetContainers(containers []corev1.Container) *PodBuilder {
 	builder.get().Spec.Containers = containers
 	return builder
@@ -51,6 +56,13 @@ func (builder *PodBuilder) SetNodeName(nodeName types.NodeName) *PodBuilder {
 
 func (builder *PodBuilder) SetFinalizers() *PodBuilder {
 	builder.get().Finalizers = nil
+	return builder
+}
+
+func (builder *PodBuilder) AddInitContainer(container corev1.Container) *PodBuilder {
+	containers := builder.get().Spec.InitContainers
+	containers = append(containers, container)
+	builder.get().Spec.InitContainers = containers
 	return builder
 }
 
@@ -88,5 +100,25 @@ func (builder *PodBuilder) AddServiceAccount(serviceAccount string) *PodBuilder 
 
 func (builder *PodBuilder) SetNodeSelector(nodeSelector map[string]string) *PodBuilder {
 	builder.get().Spec.NodeSelector = nodeSelector
+	return builder
+}
+
+func (builder *PodBuilder) SetAffinity(affinity *corev1.Affinity) *PodBuilder {
+	builder.get().Spec.Affinity = affinity
+	return builder
+}
+
+func (builder *PodBuilder) SetTopologySpreadConstraints(topologySpreadConstraints []corev1.TopologySpreadConstraint) *PodBuilder {
+	builder.get().Spec.TopologySpreadConstraints = topologySpreadConstraints
+	return builder
+}
+
+func (builder *PodBuilder) SetActiveDeadlineSeconds(activeDeadline *int64) *PodBuilder {
+	builder.get().Spec.ActiveDeadlineSeconds = activeDeadline
+	return builder
+}
+
+func (builder *PodBuilder) SetImagePullSecrets(secrets []corev1.LocalObjectReference) *PodBuilder {
+	builder.get().Spec.ImagePullSecrets = secrets
 	return builder
 }

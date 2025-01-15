@@ -6,13 +6,16 @@ sidebar_position: 3
 sidebar_label: 磁盘扩容
 ---
 
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
 # 磁盘扩容
 
-KubeBlocks 支持 Pod 扩缩容。
+KubeBlocks 支持 Pod 磁盘存储扩容。
 
 :::note
 
-磁盘扩容将触发 Pod 并行重启。重启后，主节点可能会发生变化。
+磁盘扩容将触发 Pod 重启。重启后，主节点可能会发生变化。
 
 :::
 
@@ -20,39 +23,39 @@ KubeBlocks 支持 Pod 扩缩容。
 
 确保集群处于 `Running` 状态，否则以下操作可能会失败。
 
-```bash
-kbcli cluster list <name>
-```
+<Tabs>
 
-***示例***
+<TabItem value="kubectl" label="kubectl" default>
 
 ```bash
-kbcli cluster list redis-cluster
+kubectl -n demo get cluster mycluster
 >
-NAME                 NAMESPACE        CLUSTER-DEFINITION        VERSION                TERMINATION-POLICY        STATUS         CREATED-TIME
-redis-cluster        default          redis                     redis-7.0.6            Delete                    Running        Apr 10,2023 19:00 UTC+0800
+NAME           CLUSTER-DEFINITION   VERSION        TERMINATION-POLICY   STATUS     AGE
+mycluster      redis                               Delete               Running    19m
 ```
+
+</TabItem>
+
+<TabItem value="kbcli" label="kbcli">
+
+```bash
+kbcli cluster list mycluster -n demo
+>
+NAME        NAMESPACE   CLUSTER-DEFINITION   VERSION   TERMINATION-POLICY   STATUS    CREATED-TIME
+mycluster   demo        redis                          Delete               Running   Sep 29,2024 09:46 UTC+0800
+```
+
+</TabItem>
+
+</Tabs>
 
 ## 步骤
 
-1. 更改配置，共有 3 种方式。
+<Tabs>
 
-   **选项 1**.（**推荐**） 使用 kbcli
+<TabItem value="OpsRequest" label="OpsRequest" default>
 
-   配置参数 `--components`、`--volume-claim-templates` 和 `--storage`，并执行以下命令。
-
-   ```bash
-   kbcli cluster volume-expand redis-cluster --components="redis" \
-   --volume-claim-templates="data" --storage="2Gi"
-   ```
-
-   - `--components` 表示需扩容的组件名称。
-   - `--volume-claim-templates` 表示组件中的 VolumeClaimTemplate 名称。
-   - `--storage` 表示磁盘需扩容至的大小。
-
-   **选项 2**. 创建 OpsRequest
-
-   根据需求更改 storage 的值，并执行以下命令来更改集群的存储容量。
+1. 应用 OpsRequest。根据需求更改 storage 的值，并执行以下命令来更改集群的存储容量。
 
    ```bash
    kubectl apply -f - <<EOF
@@ -60,61 +63,143 @@ redis-cluster        default          redis                     redis-7.0.6     
    kind: OpsRequest
    metadata:
      name: ops-volume-expansion
+     namespace: demo
    spec:
-     clusterRef: redis-cluster
+     clusterName: mycluster
      type: VolumeExpansion
      volumeExpansion:
      - componentName: redis
        volumeClaimTemplates:
        - name: data
-         storage: "2Gi"
+         storage: "40Gi"
    EOF
    ```
 
-   **选项 3**. 更改集群的 YAML 文件
-
-   在集群的 YAML 文件中更改 `spec.components.volumeClaimTemplates.spec.resources` 的值。
-   
-   `spec.components.volumeClaimTemplates.spec.resources` 是 Pod 的存储资源信息，更改此值会触发磁盘扩容。
-
-   ```yaml
-   apiVersion: apps.kubeblocks.io/v1alpha1
-   kind: Cluster
-   metadata:
-     name: redis-cluster
-     namespace: default
-   spec:
-     clusterDefinitionRef: redis
-     clusterVersionRef: redis-7.0.6
-     componentSpecs:
-     - componentDefRef: redis
-       name: redis
-       replicas: 2
-       volumeClaimTemplates:
-       - name: data
-         spec:
-           accessModes:
-           - ReadWriteOnce
-           resources:
-             requests:
-               storage: 1Gi # 修改磁盘容量
-     terminationPolicy: Delete
-   ```
-
-2. 验证扩容操作是否成功。
+2. 验证磁盘扩容操作是否成功。
 
    ```bash
-   kbcli cluster list <name>
-   ```
-
-   ***示例***
-
-   ```bash
-   kbcli cluster list redis-cluster
+   kubectl get ops -n demo
    >
-   NAME                 NAMESPACE        CLUSTER-DEFINITION        VERSION                  TERMINATION-POLICY        STATUS                 CREATED-TIME
-   redis-cluster        default          redis                     redis-7.0.6              Delete                    VolumeExpanding        Apr 10,2023 16:27 UTC+0800
+   NAMESPACE   NAME                   TYPE              CLUSTER     STATUS    PROGRESS   AGE
+   demo        ops-volume-expansion   VolumeExpansion   mycluster   Succeed   3/3        6m
    ```
 
-   - STATUS=VolumeExpanding 表示扩容正在进行中。
-   - STATUS=Running 表示扩容已完成。
+   如果操作过程中出现报错，可通过 `kubectl describe ops -n demo` 查看该操作的事件，协助排障。
+
+3. 当 OpsRequest 状态为 `Succeed` 或集群状态再次回到 `Running` 后，查看对应的集群资源是否变更。
+
+   ```bash
+   kubectl describe cluster mycluster -n demo
+   >
+   ...
+   Volume Claim Templates:
+      Name:  data
+      Spec:
+        Access Modes:
+          ReadWriteOnce
+        Resources:
+          Requests:
+            Storage:   40Gi
+   ```
+
+</TabItem>
+
+<TabItem value="编辑集群 YAML 文件" label="编辑集群 YAML 文件">
+
+1. 更改集群 YAML 文件中 `spec.componentSpecs.volumeClaimTemplates.spec.resources` 的值。
+
+   `spec.componentSpecs.volumeClaimTemplates.spec.resources` 定义了 Pod 的存储资源信息，更改此值会触发磁盘扩容。
+
+    ```yaml
+    spec:
+      affinity:
+        podAntiAffinity: Preferred
+        topologyKeys:
+        - kubernetes.io/hostname
+      clusterDefinitionRef: redis
+      clusterVersionRef: redis-7.0.6
+      componentSpecs:
+      - componentDefRef: redis
+        enabledLogs:
+        - running
+        disableExporter: true
+        name: redis
+        replicas: 1
+        resources:
+          limits:
+            cpu: "0.5"
+            memory: 0.5Gi
+          requests:
+            cpu: "0.5"
+            memory: 0.5Gi
+        serviceAccountName: kb-redis
+        volumeClaimTemplates:
+        - name: data
+          spec:
+            accessModes:
+            - ReadWriteOnce
+            resources:
+              requests:
+                storage: 40Gi # 修改该参数值
+    ```
+
+2. 当集群状态再次回到 `Running` 后，查看对应的集群资源是否变更。
+
+   ```bash
+   kubectl describe cluster mycluster -n demo
+   >
+   ...
+   Volume Claim Templates:
+      Name:  data
+      Spec:
+        Access Modes:
+          ReadWriteOnce
+        Resources:
+          Requests:
+            Storage:   40Gi
+   ```
+
+</TabItem>
+
+<TabItem value="kbcli" label="kbcli">
+
+1. 更改配置。
+
+   配置参数 `--components`、`--volume-claim-templates` 和 `--storage`，并执行以下命令。
+
+   ```bash
+   kbcli cluster volume-expand mycluster -n demo --components="redis" --volume-claim-templates="data" --storage="40Gi"
+   ```
+
+   - `--components` 表示需扩容的组件名称。
+   - `--volume-claim-templates` 表示组件中的 VolumeClaimTemplate 名称。
+   - `--storage` 表示磁盘需扩容至的大小。
+
+2. 可通过以下任意一种方式验证扩容操作是否完成。
+
+    - 查看 OpsRequest 进度。
+
+       执行磁盘扩容命令后，KubeBlocks 会自动输出查看 OpsRequest 进度的命令，可通过该命令查看 OpsRequest 进度的细节，包括 OpsRequest 的状态、PVC 状态等。当 OpsRequest 的状态为 `Succeed` 时，表明这一任务已完成。
+
+       ```bash
+       kbcli cluster describe-ops mycluster-volumeexpansion-ih2r4 -n demo
+       ```
+
+    - 查看集群状态。
+
+       ```bash
+       kbcli cluster list mycluster -n demo
+       ```
+
+       - STATUS=Updating 表示扩容正在进行中。
+       - STATUS=Running 表示扩容已完成。
+
+3. 当 OpsRequest 状态为 `Succeed` 或集群状态再次回到 `Running` 后，检查资源规格是否已按要求变更。
+
+   ```bash
+   kbcli cluster describe mycluster -n demo
+   ```
+
+</TabItem>
+
+</Tabs>

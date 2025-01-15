@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -25,7 +25,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
+	appsv1 "github.com/apecloud/kubeblocks/apis/apps/v1"
 	"github.com/apecloud/kubeblocks/pkg/constant"
 )
 
@@ -37,28 +37,17 @@ var _ = Describe("service descriptor builder", func() {
 			serviceKind    = "mock-kind"
 			serviceVersion = "mock-version"
 			endpointName   = "mock-endpoint"
+			hostName       = "mock-host"
+			podFQDN        = "mock-fqdn"
 			secretRefName  = "foo"
 		)
-		endpoint := appsv1alpha1.CredentialVar{
+		endpoint := appsv1.CredentialVar{
 			Value: endpointName,
 		}
-		username := &appsv1alpha1.CredentialVar{
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: secretRefName},
-					Key:                  constant.ServiceDescriptorUsernameKey,
-				},
-			},
+		host := appsv1.CredentialVar{
+			Value: hostName,
 		}
-		password := &appsv1alpha1.CredentialVar{
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: secretRefName},
-					Key:                  constant.ServiceDescriptorPasswordKey,
-				},
-			},
-		}
-		port := appsv1alpha1.CredentialVar{
+		port := appsv1.CredentialVar{
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
 					LocalObjectReference: corev1.LocalObjectReference{Name: secretRefName},
@@ -66,7 +55,27 @@ var _ = Describe("service descriptor builder", func() {
 				},
 			},
 		}
-		auth := appsv1alpha1.ConnectionCredentialAuth{
+		podFQDNs := appsv1.CredentialVar{
+			Value: podFQDN,
+		}
+		username := &appsv1.CredentialVar{
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: secretRefName},
+					Key:                  constant.ServiceDescriptorUsernameKey,
+				},
+			},
+		}
+		password := &appsv1.CredentialVar{
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: secretRefName},
+					Key:                  constant.ServiceDescriptorPasswordKey,
+				},
+			},
+		}
+
+		auth := appsv1.ConnectionCredentialAuth{
 			Username: username,
 			Password: password,
 		}
@@ -74,7 +83,9 @@ var _ = Describe("service descriptor builder", func() {
 			SetServiceKind(serviceKind).
 			SetServiceVersion(serviceVersion).
 			SetEndpoint(endpoint).
+			SetHost(host).
 			SetPort(port).
+			SetPodFQDNs(podFQDNs).
 			SetAuth(auth).
 			GetObject()
 
@@ -84,14 +95,18 @@ var _ = Describe("service descriptor builder", func() {
 		Expect(sd.Spec.ServiceVersion).Should(Equal(serviceVersion))
 		Expect(sd.Spec.Endpoint.Value).Should(Equal(endpointName))
 		Expect(sd.Spec.Endpoint.ValueFrom).Should(BeNil())
+		Expect(sd.Spec.Host.Value).Should(Equal(hostName))
+		Expect(sd.Spec.Host.ValueFrom).Should(BeNil())
+		Expect(sd.Spec.Port.Value).Should(BeEmpty())
+		Expect(sd.Spec.Port.ValueFrom.SecretKeyRef.Key).Should(Equal(constant.ServiceDescriptorPortKey))
+		Expect(sd.Spec.Port.ValueFrom.SecretKeyRef.Name).Should(Equal(secretRefName))
+		Expect(sd.Spec.PodFQDNs.Value).Should(Equal(podFQDN))
+		Expect(sd.Spec.PodFQDNs.ValueFrom).Should(BeNil())
 		Expect(sd.Spec.Auth.Username.Value).Should(BeEmpty())
 		Expect(sd.Spec.Auth.Username.ValueFrom.SecretKeyRef.Key).Should(Equal(constant.ServiceDescriptorUsernameKey))
 		Expect(sd.Spec.Auth.Username.ValueFrom.SecretKeyRef.Name).Should(Equal(secretRefName))
 		Expect(sd.Spec.Auth.Password.Value).Should(BeEmpty())
 		Expect(sd.Spec.Auth.Password.ValueFrom.SecretKeyRef.Key).Should(Equal(constant.ServiceDescriptorPasswordKey))
 		Expect(sd.Spec.Auth.Password.ValueFrom.SecretKeyRef.Name).Should(Equal(secretRefName))
-		Expect(sd.Spec.Port.Value).Should(BeEmpty())
-		Expect(sd.Spec.Port.ValueFrom.SecretKeyRef.Key).Should(Equal(constant.ServiceDescriptorPortKey))
-		Expect(sd.Spec.Port.ValueFrom.SecretKeyRef.Name).Should(Equal(secretRefName))
 	})
 })

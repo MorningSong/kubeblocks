@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,11 +20,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	dpv1alpha1 "github.com/apecloud/kubeblocks/apis/dataprotection/v1alpha1"
@@ -35,192 +33,362 @@ import (
 
 // ClusterSpec defines the desired state of Cluster.
 type ClusterSpec struct {
-	// Cluster referencing ClusterDefinition name. This is an immutable attribute.
-	// If ClusterDefRef is not specified, ComponentDef must be specified for each Component in ComponentSpecs.
+	// Specifies the name of the ClusterDefinition to use when creating a Cluster.
+	//
+	// This field enables users to create a Cluster based on a specific ClusterDefinition.
+	// Which, in conjunction with the `topology` field, determine:
+	//
+	// - The Components to be included in the Cluster.
+	// - The sequences in which the Components are created, updated, and terminate.
+	//
+	// This facilitates multiple-components management with predefined ClusterDefinition.
+	//
+	// Users with advanced requirements can bypass this general setting and specify more precise control over
+	// the composition of the Cluster by directly referencing specific ComponentDefinitions for each component
+	// within `componentSpecs[*].componentDef`.
+	//
+	// If this field is not provided, each component must be explicitly defined in `componentSpecs[*].componentDef`.
+	//
+	// Note: Once set, this field cannot be modified; it is immutable.
+	//
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern:=`^[a-z0-9]([a-z0-9\.\-]*[a-z0-9])?$`
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="clusterDefinitionRef is immutable"
 	// +optional
 	ClusterDefRef string `json:"clusterDefinitionRef,omitempty"`
 
-	// Cluster referencing ClusterVersion name.
+	// Refers to the ClusterVersion name.
+	//
+	// Deprecated since v0.9, use ComponentVersion instead.
+	// This field is maintained for backward compatibility and its use is discouraged.
+	// Existing usage should be updated to the current preferred approach to avoid compatibility issues in future releases.
+	//
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern:=`^[a-z0-9]([a-z0-9\.\-]*[a-z0-9])?$`
+	// +kubebuilder:deprecatedversion:warning="This field has been deprecated since 0.9.0"
 	// +optional
 	ClusterVersionRef string `json:"clusterVersionRef,omitempty"`
 
-	// Cluster termination policy. Valid values are DoNotTerminate, Halt, Delete, WipeOut.
-	// DoNotTerminate will block delete operation.
-	// Halt will delete workload resources such as statefulset, deployment workloads but keep PVCs.
-	// Delete is based on Halt and deletes PVCs.
-	// WipeOut is based on Delete and wipe out all volume snapshots and snapshot data from backup storage location.
+	// Specifies the name of the ClusterTopology to be used when creating the Cluster.
+	//
+	// This field defines which set of Components, as outlined in the ClusterDefinition, will be used to
+	// construct the Cluster based on the named topology.
+	// The ClusterDefinition may list multiple topologies under `clusterdefinition.spec.topologies[*]`,
+	// each tailored to different use cases or environments.
+	//
+	// If `topology` is not specified, the Cluster will use the default topology defined in the ClusterDefinition.
+	//
+	// Note: Once set during the Cluster creation, the `topology` field cannot be modified.
+	// It establishes the initial composition and structure of the Cluster and is intended for one-time configuration.
+	//
+	// +kubebuilder:validation:MaxLength=32
+	// +optional
+	Topology string `json:"topology,omitempty"`
+
+	// Specifies the behavior when a Cluster is deleted.
+	// It defines how resources, data, and backups associated with a Cluster are managed during termination.
+	// Choose a policy based on the desired level of resource cleanup and data preservation:
+	//
+	// - `DoNotTerminate`: Prevents deletion of the Cluster. This policy ensures that all resources remain intact.
+	// - `Halt`: Deletes Cluster resources like Pods and Services but retains Persistent Volume Claims (PVCs),
+	//   allowing for data preservation while stopping other operations.
+	//    Warning: Halt policy is deprecated in 0.9.1 and will have same meaning as DoNotTerminate.
+	// - `Delete`: Extends the `Halt` policy by also removing PVCs, leading to a thorough cleanup while
+	//   removing all persistent data.
+	// - `WipeOut`: An aggressive policy that deletes all Cluster resources, including volume snapshots and
+	//   backups in external storage.
+	//   This results in complete data removal and should be used cautiously, primarily in non-production environments
+	//   to avoid irreversible data loss.
+	//
+	// Warning: Choosing an inappropriate termination policy can result in data loss.
+	// The `WipeOut` policy is particularly risky in production environments due to its irreversible nature.
+	//
 	// +kubebuilder:validation:Required
 	TerminationPolicy TerminationPolicyType `json:"terminationPolicy"`
 
-	// List of componentSpecs you want to replace in ClusterDefinition and ClusterVersion. It will replace the field in ClusterDefinition's and ClusterVersion's component if type is matching.
+	// Specifies a list of ShardingSpec objects that manage the sharding topology for Cluster Components.
+	// Each ShardingSpec organizes components into shards, with each shard corresponding to a Component.
+	// Components within a shard are all based on a common ClusterComponentSpec template, ensuring uniform configurations.
+	//
+	// This field supports dynamic resharding by facilitating the addition or removal of shards
+	// through the `shards` field in ShardingSpec.
+	//
+	// Note: `shardingSpecs` and `componentSpecs` cannot both be empty; at least one must be defined to configure a Cluster.
+	//
 	// +patchMergeKey=name
 	// +patchStrategy=merge,retainKeys
 	// +listType=map
 	// +listMapKey=name
-	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=128
+	// +optional
+	ShardingSpecs []ShardingSpec `json:"shardingSpecs,omitempty"`
+
+	// Specifies a list of ClusterComponentSpec objects used to define the individual Components that make up a Cluster.
+	// This field allows for detailed configuration of each Component within the Cluster.
+	//
+	// Note: `shardingSpecs` and `componentSpecs` cannot both be empty; at least one must be defined to configure a Cluster.
+	//
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=128
 	// +kubebuilder:validation:XValidation:rule="self.all(x, size(self.filter(c, c.name == x.name)) == 1)",message="duplicated component"
+	// +kubebuilder:validation:XValidation:rule="self.all(x, size(self.filter(c, has(c.componentDef))) == 0) || self.all(x, size(self.filter(c, has(c.componentDef))) == size(self))",message="two kinds of definition API can not be used simultaneously"
+	// +optional
 	ComponentSpecs []ClusterComponentSpec `json:"componentSpecs,omitempty" patchStrategy:"merge,retainKeys" patchMergeKey:"name"`
 
-	// services defines the services to access a cluster.
+	// Defines a list of additional Services that are exposed by a Cluster.
+	// This field allows Services of selected Components, either from `componentSpecs` or `shardingSpecs` to be exposed,
+	// alongside Services defined with ComponentService.
+	//
+	// Services defined here can be referenced by other clusters using the ServiceRefClusterSelector.
+	//
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +optional
-	Services []Service `json:"services,omitempty"`
+	Services []ClusterService `json:"services,omitempty"`
 
-	// affinity is a group of affinity scheduling rules.
+	// Defines a set of node affinity scheduling rules for the Cluster's Pods.
+	// This field helps control the placement of Pods on nodes within the Cluster.
+	//
+	// Deprecated since v0.10. Use the `schedulingPolicy` field instead.
+	//
+	// +kubebuilder:deprecatedversion:warning="This field has been deprecated since 0.10.0"
 	// +optional
 	Affinity *Affinity `json:"affinity,omitempty"`
 
-	// tolerations are attached to tolerate any taint that matches the triple `key,value,effect` using the matching operator `operator`.
+	// An array that specifies tolerations attached to the Cluster's Pods,
+	// allowing them to be scheduled onto nodes with matching taints.
+	//
+	// Deprecated since v0.10. Use the `schedulingPolicy` field instead.
+	//
+	// +kubebuilder:deprecatedversion:warning="This field has been deprecated since 0.10.0"
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +optional
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 
-	// tenancy describes how pods are distributed across node.
-	// SharedNode means multiple pods may share the same node.
-	// DedicatedNode means each pod runs on their own dedicated node.
+	// Specifies the scheduling policy for the Cluster.
+	//
+	// +optional
+	SchedulingPolicy *SchedulingPolicy `json:"schedulingPolicy,omitempty"`
+
+	// Specifies runtimeClassName for all Pods managed by this Cluster.
+	//
+	// +optional
+	RuntimeClassName *string `json:"runtimeClassName,omitempty"`
+
+	// Specifies the backup configuration of the Cluster.
+	//
+	// +optional
+	Backup *ClusterBackup `json:"backup,omitempty"`
+
+	// !!!!! The following fields may be deprecated in subsequent versions, please DO NOT rely on them for new requirements.
+
+	// Describes how Pods are distributed across node.
+	//
+	// Deprecated since v0.9.
+	// This field is maintained for backward compatibility and its use is discouraged.
+	// Existing usage should be updated to the current preferred approach to avoid compatibility issues in future releases.
+	//
+	// +kubebuilder:deprecatedversion:warning="This field has been deprecated since 0.9.0"
 	// +optional
 	Tenancy TenancyType `json:"tenancy,omitempty"`
 
-	// availabilityPolicy describes the availability policy, including zone, node, and none.
+	// Describes the availability policy, including zone, node, and none.
+	//
+	// Deprecated since v0.9.
+	// This field is maintained for backward compatibility and its use is discouraged.
+	// Existing usage should be updated to the current preferred approach to avoid compatibility issues in future releases.
+	//
+	// +kubebuilder:deprecatedversion:warning="This field has been deprecated since 0.9.0"
 	// +optional
 	AvailabilityPolicy AvailabilityPolicyType `json:"availabilityPolicy,omitempty"`
 
-	// replicas specifies the replicas of the first componentSpec, if the replicas of the first componentSpec is specified, this value will be ignored.
+	// Specifies the replicas of the first componentSpec, if the replicas of the first componentSpec is specified,
+	// this value will be ignored.
+	//
+	// Deprecated since v0.9.
+	// This field is maintained for backward compatibility and its use is discouraged.
+	// Existing usage should be updated to the current preferred approach to avoid compatibility issues in future releases.
+	//
+	// +kubebuilder:deprecatedversion:warning="This field has been deprecated since 0.9.0"
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
 
-	// resources specifies the resources of the first componentSpec, if the resources of the first componentSpec is specified, this value will be ignored.
+	// Specifies the resources of the first componentSpec, if the resources of the first componentSpec is specified,
+	// this value will be ignored.
+	//
+	// Deprecated since v0.9.
+	// This field is maintained for backward compatibility and its use is discouraged.
+	// Existing usage should be updated to the current preferred approach to avoid compatibility issues in future releases.
+	//
+	// +kubebuilder:deprecatedversion:warning="This field has been deprecated since 0.9.0"
 	// +optional
 	Resources ClusterResources `json:"resources,omitempty"`
 
-	// storage specifies the storage of the first componentSpec, if the storage of the first componentSpec is specified, this value will be ignored.
+	// Specifies the storage of the first componentSpec, if the storage of the first componentSpec is specified,
+	// this value will be ignored.
+	//
+	// Deprecated since v0.9.
+	// This field is maintained for backward compatibility and its use is discouraged.
+	// Existing usage should be updated to the current preferred approach to avoid compatibility issues in future releases.
+	//
+	// +kubebuilder:deprecatedversion:warning="This field has been deprecated since 0.9.0"
 	// +optional
 	Storage ClusterStorage `json:"storage,omitempty"`
 
-	// monitor specifies the configuration of monitor
-	// +optional
-	Monitor ClusterMonitor `json:"monitor,omitempty"`
-
-	// network specifies the configuration of network
+	// The configuration of network.
+	//
+	// Deprecated since v0.9.
+	// This field is maintained for backward compatibility and its use is discouraged.
+	// Existing usage should be updated to the current preferred approach to avoid compatibility issues in future releases.
+	//
+	// +kubebuilder:deprecatedversion:warning="This field has been deprecated since 0.9.0"
 	// +optional
 	Network *ClusterNetwork `json:"network,omitempty"`
-
-	// cluster backup configuration.
-	// +optional
-	Backup *ClusterBackup `json:"backup,omitempty"`
 }
 
 type ClusterBackup struct {
-	// enabled defines whether to enable automated backup.
+	// Specifies whether automated backup is enabled for the Cluster.
+	//
 	// +kubebuilder:default=false
 	// +optional
 	Enabled *bool `json:"enabled,omitempty"`
 
-	// retentionPeriod determines a duration up to which the backup should be kept.
-	// controller will remove all backups that are older than the RetentionPeriod.
+	// Determines the duration to retain backups. Backups older than this period are automatically removed.
+	//
 	// For example, RetentionPeriod of `30d` will keep only the backups of last 30 days.
 	// Sample duration format:
+	//
 	// - years: 	2y
 	// - months: 	6mo
 	// - days: 		30d
 	// - hours: 	12h
 	// - minutes: 	30m
-	// You can also combine the above durations. For example: 30d12h30m
+	//
+	// You can also combine the above durations. For example: 30d12h30m.
+	// Default value is 7d.
+	//
 	// +kubebuilder:default="7d"
 	// +optional
 	RetentionPeriod dpv1alpha1.RetentionPeriod `json:"retentionPeriod,omitempty"`
 
-	// backup method name to use, that is defined in backupPolicy.
-	// +optional
+	// Specifies the backup method to use, as defined in backupPolicy.
+	//
+	// +kubebuilder:validation:Required
 	Method string `json:"method"`
 
-	// the cron expression for schedule, the timezone is in UTC. see https://en.wikipedia.org/wiki/Cron.
+	// The cron expression for the schedule. The timezone is in UTC. See https://en.wikipedia.org/wiki/Cron.
+	//
 	// +optional
 	CronExpression string `json:"cronExpression,omitempty"`
 
-	// startingDeadlineMinutes defines the deadline in minutes for starting the backup job
-	// if it misses scheduled time for any reason.
+	// Specifies the maximum time in minutes that the system will wait to start a missed backup job.
+	// If the scheduled backup time is missed for any reason, the backup job must start within this deadline.
+	// Values must be between 0 (immediate execution) and 1440 (one day).
+	//
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=1440
 	// +optional
 	StartingDeadlineMinutes *int64 `json:"startingDeadlineMinutes,omitempty"`
 
-	// repoName is the name of the backupRepo, if not set, will use the default backupRepo.
+	// Specifies the name of the backupRepo. If not set, the default backupRepo will be used.
+	//
 	// +optional
 	RepoName string `json:"repoName,omitempty"`
 
-	// pitrEnabled defines whether to enable point-in-time recovery.
+	// Specifies whether to enable point-in-time recovery.
+	//
 	// +kubebuilder:default=false
 	// +optional
 	PITREnabled *bool `json:"pitrEnabled,omitempty"`
+
+	// Specifies whether to enable incremental backup.
+	//
+	// +kubebuilder:default=false
+	// +optional
+	IncrementalBackupEnabled *bool `json:"incrementalBackupEnabled,omitempty"`
+
+	// The cron expression for the incremental backup schedule. The timezone is in UTC. See https://en.wikipedia.org/wiki/Cron.
+	//
+	// +optional
+	IncrementalCronExpression string `json:"incrementalCronExpression,omitempty"`
 }
 
+// ClusterResources is deprecated since v0.9.
 type ClusterResources struct {
-
-	// cpu resource needed, more info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+	// Specifies the amount of CPU resource the Cluster needs.
+	// For more information, refer to: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+	//
 	// +optional
 	CPU resource.Quantity `json:"cpu,omitempty"`
 
-	// memory resource needed, more info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+	// Specifies the amount of memory resource the Cluster needs.
+	// For more information, refer to: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+	//
 	// +optional
 	Memory resource.Quantity `json:"memory,omitempty"`
 }
 
+// ClusterStorage is deprecated since v0.9.
 type ClusterStorage struct {
-
-	// storage size needed, more info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+	// Specifies the amount of storage the Cluster needs.
+	// For more information, refer to: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+	//
 	// +optional
 	Size resource.Quantity `json:"size,omitempty"`
 }
 
+// ResourceMeta encapsulates metadata and configuration for referencing ConfigMaps and Secrets as volumes.
 type ResourceMeta struct {
-	// name is the name of the referenced the Configmap/Secret object.
+	// Name is the name of the referenced ConfigMap or Secret object. It must conform to DNS label standards.
+	//
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern:=`^[a-z0-9]([a-z0-9\.\-]*[a-z0-9])?$`
 	Name string `json:"name"`
 
-	// mountPath is the path at which to mount the volume.
+	// MountPoint is the filesystem path where the volume will be mounted.
+	//
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MaxLength=256
 	// +kubebuilder:validation:Pattern:=`^/[a-z]([a-z0-9\-]*[a-z0-9])?$`
 	MountPoint string `json:"mountPoint"`
 
-	// subPath is a relative file path within the volume to mount.
+	// SubPath specifies a path within the volume from which to mount.
+	//
 	// +optional
 	SubPath string `json:"subPath,omitempty"`
 
-	// asVolumeFrom defines the list of containers where volumeMounts will be injected into.
+	// AsVolumeFrom lists the names of containers in which the volume should be mounted.
+	//
 	// +listType=set
 	// +optional
 	AsVolumeFrom []string `json:"asVolumeFrom,omitempty"`
 }
 
+// SecretRef defines a reference to a Secret.
 type SecretRef struct {
 	ResourceMeta `json:",inline"`
 
-	// secret defines the secret volume source.
+	// Secret specifies the Secret to be mounted as a volume.
+	//
 	// +kubebuilder:validation:Required
 	Secret corev1.SecretVolumeSource `json:"secret"`
 }
 
+// ConfigMapRef defines a reference to a ConfigMap.
 type ConfigMapRef struct {
 	ResourceMeta `json:",inline"`
 
-	// configMap defines the configmap volume source.
+	// ConfigMap specifies the ConfigMap to be mounted as a volume.
+	//
 	// +kubebuilder:validation:Required
 	ConfigMap corev1.ConfigMapVolumeSource `json:"configMap"`
 }
 
+// UserResourceRefs defines references to user-defined Secrets and ConfigMaps.
 type UserResourceRefs struct {
-	// secretRefs defines the user-defined secrets.
+	// SecretRefs defines the user-defined Secrets.
+	//
 	// +patchMergeKey=name
 	// +patchStrategy=merge,retainKeys
 	// +listType=map
@@ -228,7 +396,8 @@ type UserResourceRefs struct {
 	// +optional
 	SecretRefs []SecretRef `json:"secretRefs,omitempty"`
 
-	// configMapRefs defines the user-defined configmaps.
+	// ConfigMapRefs defines the user-defined ConfigMaps.
+	//
 	// +patchMergeKey=name
 	// +patchStrategy=merge,retainKeys
 	// +listType=map
@@ -237,297 +406,573 @@ type UserResourceRefs struct {
 	ConfigMapRefs []ConfigMapRef `json:"configMapRefs,omitempty"`
 }
 
-// ClusterStatus defines the observed state of Cluster.
+// InstanceTemplate allows customization of individual replica configurations in a Component.
+type InstanceTemplate struct {
+	// Name specifies the unique name of the instance Pod created using this InstanceTemplate.
+	// This name is constructed by concatenating the Component's name, the template's name, and the instance's ordinal
+	// using the pattern: $(cluster.name)-$(component.name)-$(template.name)-$(ordinal). Ordinals start from 0.
+	// The specified name overrides any default naming conventions or patterns.
+	//
+	// +kubebuilder:validation:MaxLength=54
+	// +kubebuilder:validation:Pattern:=`^[a-z0-9]([a-z0-9\.\-]*[a-z0-9])?$`
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+
+	// Specifies the number of instances (Pods) to create from this InstanceTemplate.
+	// This field allows setting how many replicated instances of the Component,
+	// with the specific overrides in the InstanceTemplate, are created.
+	// The default value is 1. A value of 0 disables instance creation.
+	//
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	Replicas *int32 `json:"replicas,omitempty"`
+
+	// Specifies a map of key-value pairs to be merged into the Pod's existing annotations.
+	// Existing keys will have their values overwritten, while new keys will be added to the annotations.
+	//
+	// +optional
+	Annotations map[string]string `json:"annotations,omitempty"`
+
+	// Specifies a map of key-value pairs that will be merged into the Pod's existing labels.
+	// Values for existing keys will be overwritten, and new keys will be added.
+	//
+	// +optional
+	Labels map[string]string `json:"labels,omitempty"`
+
+	// Specifies an override for the first container's image in the Pod.
+	//
+	// +optional
+	Image *string `json:"image,omitempty"`
+
+	// Specifies the scheduling policy for the Component.
+	//
+	// +optional
+	SchedulingPolicy *SchedulingPolicy `json:"schedulingPolicy,omitempty"`
+
+	// Specifies an override for the resource requirements of the first container in the Pod.
+	// This field allows for customizing resource allocation (CPU, memory, etc.) for the container.
+	//
+	// +optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// Defines Env to override.
+	// Add new or override existing envs.
+	// +optional
+	Env []corev1.EnvVar `json:"env,omitempty"`
+
+	// Defines Volumes to override.
+	// Add new or override existing volumes.
+	// +optional
+	Volumes []corev1.Volume `json:"volumes,omitempty"`
+
+	// Defines VolumeMounts to override.
+	// Add new or override existing volume mounts of the first container in the Pod.
+	// +optional
+	VolumeMounts []corev1.VolumeMount `json:"volumeMounts,omitempty"`
+
+	// Defines VolumeClaimTemplates to override.
+	// Add new or override existing volume claim templates.
+	// +optional
+	VolumeClaimTemplates []ClusterComponentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
+}
+
+// ClusterStatus defines the observed state of the Cluster.
 type ClusterStatus struct {
-	// observedGeneration is the most recent generation observed for this
-	// Cluster. It corresponds to the Cluster's generation, which is
-	// updated on mutation by the API Server.
+	// The most recent generation number of the Cluster object that has been observed by the controller.
+	//
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// phase describes the phase of the Cluster, the detail information of the phases are as following:
-	// Creating: all components are in `Creating` phase.
-	// Running: all components are in `Running` phase, means the cluster is working well.
-	// Updating: all components are in `Creating`, `Running` or `Updating` phase,
-	// and at least one component is in `Creating` or `Updating` phase, means the cluster is doing an update.
-	// Stopping: at least one component is in `Stopping` phase, means the cluster is in a stop progress.
-	// Stopped: all components are in 'Stopped` phase, means the cluster has stopped and didn't provide any function anymore.
-	// Failed: all components are in `Failed` phase, means the cluster is unavailable.
-	// Abnormal: some components are in `Failed` or `Abnormal` phase, means the cluster in a fragile state. troubleshoot need to be done.
-	// Deleting: the cluster is being deleted.
+	// The current phase of the Cluster includes:
+	// `Creating`, `Running`, `Updating`, `Stopping`, `Stopped`, `Deleting`, `Failed`, `Abnormal`.
+	//
 	// +optional
 	Phase ClusterPhase `json:"phase,omitempty"`
 
-	// message describes cluster details message in current phase.
+	// Provides additional information about the current phase.
+	//
 	// +optional
 	Message string `json:"message,omitempty"`
 
-	// components record the current status information of all components of the cluster.
+	// Records the current status information of all Components within the Cluster.
+	//
 	// +optional
 	Components map[string]ClusterComponentStatus `json:"components,omitempty"`
 
-	// clusterDefGeneration represents the generation number of ClusterDefinition referenced.
+	// Represents the generation number of the referenced ClusterDefinition.
+	//
 	// +optional
 	ClusterDefGeneration int64 `json:"clusterDefGeneration,omitempty"`
 
-	// Describe current state of cluster API Resource, like warning.
+	// Represents a list of detailed status of the Cluster object.
+	// Each condition in the list provides real-time information about certain aspect of the Cluster object.
+	//
+	// This field is crucial for administrators and developers to monitor and respond to changes within the Cluster.
+	// It provides a history of state transitions and a snapshot of the current state that can be used for
+	// automated logic or direct inspection.
+	//
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
-// ClusterComponentSpec defines the cluster component spec.
-// +kubebuilder:validation:XValidation:rule="has(self.componentDefRef) || has(self.componentDef)",message="either componentDefRef or componentDef should be provided"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.componentDefRef) || has(self.componentDefRef)", message="componentDefRef is required once set"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.componentDef) || has(self.componentDef)", message="componentDef is required once set"
-type ClusterComponentSpec struct {
-	// name defines cluster's component name, this name is also part of Service DNS name, so this name will
-	// comply with IANA Service Naming rule.
+// ShardingSpec defines how KubeBlocks manage dynamic provisioned shards.
+// A typical design pattern for distributed databases is to distribute data across multiple shards,
+// with each shard consisting of multiple replicas.
+// Therefore, KubeBlocks supports representing a shard with a Component and dynamically instantiating Components
+// using a template when shards are added.
+// When shards are removed, the corresponding Components are also deleted.
+type ShardingSpec struct {
+	// Represents the common parent part of all shard names.
+	// This identifier is included as part of the Service DNS name and must comply with IANA service naming rules.
+	// It is used to generate the names of underlying Components following the pattern `$(shardingSpec.name)-$(ShardID)`.
+	// ShardID is a random string that is appended to the Name to generate unique identifiers for each shard.
+	// For example, if the sharding specification name is "my-shard" and the ShardID is "abc", the resulting Component name
+	// would be "my-shard-abc".
+	//
+	// Note that the name defined in Component template(`shardingSpec.template.name`) will be disregarded
+	// when generating the Component names of the shards. The `shardingSpec.name` field takes precedence.
+	//
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MaxLength=22
-	// +kubebuilder:validation:Pattern:=`^[a-z]([a-z0-9\-]*[a-z0-9])?$`
+	// +kubebuilder:validation:MaxLength=15
+	// +kubebuilder:validation:Pattern:=`^[a-z0-9]([a-z0-9\.\-]*[a-z0-9])?$`
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="name is immutable"
 	Name string `json:"name"`
 
-	// componentDefRef references componentDef defined in ClusterDefinition spec. Need to
-	// comply with IANA Service Naming rule.
+	// The template for generating Components for shards, where each shard consists of one Component.
+	// This field is of type ClusterComponentSpec, which encapsulates all the required details and
+	// definitions for creating and managing the Components.
+	// KubeBlocks uses this template to generate a set of identical Components or shards.
+	// All the generated Components will have the same specifications and definitions as specified in the `template` field.
+	//
+	// This allows for the creation of multiple Components with consistent configurations,
+	// enabling sharding and distribution of workloads across Components.
+	//
+	// +kubebuilder:validation:Required
+	Template ClusterComponentSpec `json:"template"`
+
+	// Specifies the desired number of shards.
+	// Users can declare the desired number of shards through this field.
+	// KubeBlocks dynamically creates and deletes Components based on the difference
+	// between the desired and actual number of shards.
+	// KubeBlocks provides lifecycle management for sharding, including:
+	//
+	// - Executing the postProvision Action defined in the ComponentDefinition when the number of shards increases.
+	//   This allows for custom actions to be performed after a new shard is provisioned.
+	// - Executing the preTerminate Action defined in the ComponentDefinition when the number of shards decreases.
+	//   This enables custom cleanup or data migration tasks to be executed before a shard is terminated.
+	//   Resources and data associated with the corresponding Component will also be deleted.
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=2048
+	Shards int32 `json:"shards,omitempty"`
+}
+
+// ClusterComponentSpec defines the specification of a Component within a Cluster.
+// TODO +kubebuilder:validation:XValidation:rule="!has(oldSelf.componentDefRef) || has(self.componentDefRef)", message="componentDefRef is required once set"
+// TODO +kubebuilder:validation:XValidation:rule="!has(oldSelf.componentDef) || has(self.componentDef)", message="componentDef is required once set"
+type ClusterComponentSpec struct {
+	// Specifies the Component's name.
+	// It's part of the Service DNS name and must comply with the IANA service naming rule.
+	// The name is optional when ClusterComponentSpec is used as a template (e.g., in `shardingSpec`),
+	// but required otherwise.
+	//
 	// +kubebuilder:validation:MaxLength=22
 	// +kubebuilder:validation:Pattern:=`^[a-z]([a-z0-9\-]*[a-z0-9])?$`
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="componentDefRef is immutable"
+	// TODO +kubebuilder:validation:XValidation:rule="self == oldSelf",message="name is immutable"
+	// +optional
+	Name string `json:"name"`
+
+	// References a ClusterComponentDefinition defined in the `clusterDefinition.spec.componentDef` field.
+	// Must comply with the IANA service naming rule.
+	//
+	// Deprecated since v0.9,
+	// because defining Components in `clusterDefinition.spec.componentDef` field has been deprecated.
+	// This field is replaced by the `componentDef` field, use `componentDef` instead.
+	// This field is maintained for backward compatibility and its use is discouraged.
+	// Existing usage should be updated to the current preferred approach to avoid compatibility issues in future releases.
+	//
+	// +kubebuilder:validation:MaxLength=22
+	// +kubebuilder:validation:Pattern:=`^[a-z]([a-z0-9\-]*[a-z0-9])?$`
+	// TODO +kubebuilder:validation:XValidation:rule="self == oldSelf",message="componentDefRef is immutable"
+	// +kubebuilder:deprecatedversion:warning="This field has been deprecated since 0.9.0, consider using the ComponentDef instead"
 	// +optional
 	ComponentDefRef string `json:"componentDefRef,omitempty"`
 
-	// componentDef references the name of the ComponentDefinition.
-	// If both componentDefRef and componentDef are provided, the componentDef will take precedence over componentDefRef.
-	// +kubebuilder:validation:MaxLength=22
+	// Specifies the exact name, name prefix, or regular expression pattern for matching the name of the ComponentDefinition
+	// custom resource (CR) that defines the Component's characteristics and behavior.
+	//
+	// If both `componentDefRef` and `componentDef` are provided,
+	// the `componentDef` will take precedence over `componentDefRef`.
+	//
+	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:Pattern:=`^[a-z0-9]([a-z0-9\.\-]*[a-z0-9])?$`
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="componentDef is immutable"
 	// +optional
 	ComponentDef string `json:"componentDef,omitempty"`
 
-	// classDefRef references the class defined in ComponentClassDefinition.
+	// ServiceVersion specifies the version of the Service expected to be provisioned by this Component.
+	// The version should follow the syntax and semantics of the "Semantic Versioning" specification (http://semver.org/).
+	// If no version is specified, the latest available version will be used.
+	//
+	// +kubebuilder:validation:MaxLength=32
+	// +optional
+	ServiceVersion string `json:"serviceVersion,omitempty"`
+
+	// References the class defined in ComponentClassDefinition.
+	//
+	// Deprecated since v0.9.
+	// This field is maintained for backward compatibility and its use is discouraged.
+	// Existing usage should be updated to the current preferred approach to avoid compatibility issues in future releases.
+	//
+	// +kubebuilder:deprecatedversion:warning="This field has been deprecated since 0.9.0"
 	// +optional
 	ClassDefRef *ClassDefRef `json:"classDefRef,omitempty"`
 
-	// serviceRefs define service references for the current component. Based on the referenced services, they can be categorized into two types:
-	// Service provided by external sources: These services are provided by external sources and are not managed by KubeBlocks. They can be Kubernetes-based or non-Kubernetes services. For external services, you need to provide an additional ServiceDescriptor object to establish the service binding.
-	// Service provided by other KubeBlocks clusters: These services are provided by other KubeBlocks clusters. You can bind to these services by specifying the name of the hosting cluster.
-	// Each type of service reference requires specific configurations and bindings to establish the connection and interaction with the respective services.
-	// It should be noted that the ServiceRef has cluster-level semantic consistency, meaning that within the same Cluster, service references with the same ServiceRef.Name are considered to be the same service. It is only allowed to bind to the same Cluster or ServiceDescriptor.
+	// Defines a list of ServiceRef for a Component, enabling access to both external services and
+	// Services provided by other Clusters.
+	//
+	// Types of services:
+	//
+	// - External services: Not managed by KubeBlocks or managed by a different KubeBlocks operator;
+	//   Require a ServiceDescriptor for connection details.
+	// - Services provided by a Cluster: Managed by the same KubeBlocks operator;
+	//   identified using Cluster, Component and Service names.
+	//
+	// ServiceRefs with identical `serviceRef.name` in the same Cluster are considered the same.
+	//
+	// Example:
+	// ```yaml
+	// serviceRefs:
+	//   - name: "redis-sentinel"
+	//     serviceDescriptor:
+	//       name: "external-redis-sentinel"
+	//   - name: "postgres-cluster"
+	//     clusterServiceSelector:
+	//       cluster: "my-postgres-cluster"
+	//       service:
+	//         component: "postgresql"
+	// ```
+	// The example above includes ServiceRefs to an external Redis Sentinel service and a PostgreSQL Cluster.
+	//
 	// +optional
 	ServiceRefs []ServiceRef `json:"serviceRefs,omitempty"`
 
-	// monitor is a switch to enable monitoring and is set as false by default.
-	// KubeBlocks provides an extension mechanism to support component level monitoring,
-	// which will scrape metrics auto or manually from servers in component and export
-	// metrics to Time Series Database.
-	// +kubebuilder:default=false
-	// +optional
-	Monitor bool `json:"monitor,omitempty"`
-
-	// enabledLogs indicates which log file takes effect in the database cluster.
-	// element is the log type which is defined in cluster definition logConfig.name,
-	// and will set relative variables about this log type in database kernel.
+	// Specifies which types of logs should be collected for the Component.
+	// The log types are defined in the `componentDefinition.spec.logConfigs` field with the LogConfig entries.
+	//
+	// The elements in the `enabledLogs` array correspond to the names of the LogConfig entries.
+	// For example, if the `componentDefinition.spec.logConfigs` defines LogConfig entries with
+	// names "slow_query_log" and "error_log",
+	// you can enable the collection of these logs by including their names in the `enabledLogs` array:
+	// ```yaml
+	// enabledLogs:
+	// - slow_query_log
+	// - error_log
+	// ```
+	//
 	// +listType=set
 	// +optional
 	EnabledLogs []string `json:"enabledLogs,omitempty"`
 
-	// Component replicas.
+	// Specifies Labels to override or add for underlying Pods, PVCs, Account & TLS Secrets, Services Owned by Component.
+	//
+	// +optional
+	Labels map[string]string `json:"labels,omitempty"`
+
+	// Specifies Annotations to override or add for underlying Pods, PVCs, Account & TLS Secrets, Services Owned by Component.
+	//
+	// +optional
+	Annotations map[string]string `json:"annotations,omitempty"`
+
+	// List of environment variables to add.
+	// These environment variables will be placed after the environment variables declared in the Pod.
+	//
+	// +optional
+	Env []corev1.EnvVar `json:"env,omitempty"`
+
+	// Specifies the desired number of replicas in the Component for enhancing availability and durability, or load balancing.
+	//
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:default=1
 	Replicas int32 `json:"replicas"`
 
-	// affinity describes affinities specified by users.
+	// Specifies a group of affinity scheduling rules for the Component.
+	// It allows users to control how the Component's Pods are scheduled onto nodes in the K8s cluster.
+	//
+	// Deprecated since v0.10, replaced by the `schedulingPolicy` field.
+	//
+	// +kubebuilder:deprecatedversion:warning="This field has been deprecated since 0.10.0"
 	// +optional
 	Affinity *Affinity `json:"affinity,omitempty"`
 
-	// Component tolerations will override ClusterSpec.Tolerations if specified.
+	// Allows Pods to be scheduled onto nodes with matching taints.
+	// Each toleration in the array allows the Pod to tolerate node taints based on
+	// specified `key`, `value`, `effect`, and `operator`.
+	//
+	// - The `key`, `value`, and `effect` identify the taint that the toleration matches.
+	// - The `operator` determines how the toleration matches the taint.
+	//
+	// Pods with matching tolerations are allowed to be scheduled on tainted nodes, typically reserved for specific purposes.
+	//
+	// Deprecated since v0.10, replaced by the `schedulingPolicy` field.
+	//
+	// +kubebuilder:deprecatedversion:warning="This field has been deprecated since 0.10.0"
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +optional
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 
-	// Resources requests and limits of workload.
+	// Specifies the scheduling policy for the Component.
+	//
+	// +optional
+	SchedulingPolicy *SchedulingPolicy `json:"schedulingPolicy,omitempty"`
+
+	// Specifies the resources required by the Component.
+	// It allows defining the CPU, memory requirements and limits for the Component's containers.
+	//
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 
-	// volumeClaimTemplates information for statefulset.spec.volumeClaimTemplates.
-	// +optional
+	// Specifies a list of PersistentVolumeClaim templates that represent the storage requirements for the Component.
+	// Each template specifies the desired characteristics of a persistent volume, such as storage class,
+	// size, and access modes.
+	// These templates are used to dynamically provision persistent volumes for the Component.
+	//
 	// +patchMergeKey=name
 	// +patchStrategy=merge,retainKeys
+	// +optional
 	VolumeClaimTemplates []ClusterComponentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty" patchStrategy:"merge,retainKeys" patchMergeKey:"name"`
 
-	// Services expose endpoints that can be accessed by clients.
+	// List of volumes to override.
+	//
+	// +optional
+	Volumes []corev1.Volume `json:"volumes,omitempty"`
+
+	// Overrides services defined in referenced ComponentDefinition and expose endpoints that can be accessed by clients.
+	//
 	// +optional
 	Services []ClusterComponentService `json:"services,omitempty"`
 
-	// switchPolicy defines the strategy for switchover and failover when workloadType is Replication.
+	// Overrides system accounts defined in referenced ComponentDefinition.
+	//
+	// +optional
+	SystemAccounts []ComponentSystemAccount `json:"systemAccounts,omitempty"`
+
+	// Specifies the configuration content of a config template.
+	//
+	// +optional
+	Configs []ClusterComponentConfig `json:"configs,omitempty"`
+
+	// Defines the strategy for switchover and failover.
+	//
+	// Deprecated since v0.9.
+	// This field is maintained for backward compatibility and its use is discouraged.
+	// Existing usage should be updated to the current preferred approach to avoid compatibility issues in future releases.
+	//
+	// +kubebuilder:deprecatedversion:warning="This field has been deprecated since 0.9.0"
 	// +optional
 	SwitchPolicy *ClusterSwitchPolicy `json:"switchPolicy,omitempty"`
 
-	// Enables or disables TLS certs.
+	// A boolean flag that indicates whether the Component should use Transport Layer Security (TLS)
+	// for secure communication.
+	// When set to true, the Component will be configured to use TLS encryption for its network connections.
+	// This ensures that the data transmitted between the Component and its clients or other Components is encrypted
+	// and protected from unauthorized access.
+	// If TLS is enabled, the Component may require additional configuration, such as specifying TLS certificates and keys,
+	// to properly set up the secure communication channel.
+	//
 	// +optional
 	TLS bool `json:"tls,omitempty"`
 
-	// issuer defines provider context for TLS certs.
-	// required when TLS enabled
+	// Specifies the configuration for the TLS certificates issuer.
+	// It allows defining the issuer name and the reference to the secret containing the TLS certificates and key.
+	// The secret should contain the CA certificate, TLS certificate, and private key in the specified keys.
+	// Required when TLS is enabled.
+	//
 	// +optional
 	Issuer *Issuer `json:"issuer,omitempty"`
 
-	// serviceAccountName is the name of the ServiceAccount that running component depends on.
+	// Specifies the name of the ServiceAccount required by the running Component.
+	// This ServiceAccount is used to grant necessary permissions for the Component's Pods to interact
+	// with other Kubernetes resources, such as modifying Pod labels or sending events.
+	//
+	// Defaults:
+	// To perform certain operational tasks, agent sidecars running in Pods require specific RBAC permissions.
+	// The service account will be bound to a default role named "kubeblocks-cluster-pod-role" which is installed together with KubeBlocks.
+	// If not specified, KubeBlocks automatically assigns a default ServiceAccount named "kb-{cluster.name}"
+	//
+	// Future Changes:
+	// Future versions might change the default ServiceAccount creation strategy to one per Component,
+	// potentially revising the naming to "kb-{cluster.name}-{component.name}".
+	//
+	// Users can override the automatic ServiceAccount assignment by explicitly setting the name of
+	// an existed ServiceAccount in this field.
+	//
 	// +optional
 	ServiceAccountName string `json:"serviceAccountName,omitempty"`
 
-	// noCreatePDB defines the PodDisruptionBudget creation behavior and is set to true if creation of PodDisruptionBudget
-	// for this component is not needed. It defaults to false.
-	// +kubebuilder:default=false
-	// +optional
-	NoCreatePDB bool `json:"noCreatePDB,omitempty"`
-
-	// updateStrategy defines the update strategy for the component.
+	// Defines the update strategy for the Component.
+	//
+	// Deprecated since v0.9.
+	// This field is maintained for backward compatibility and its use is discouraged.
+	// Existing usage should be updated to the current preferred approach to avoid compatibility issues in future releases.
+	//
+	// +kubebuilder:deprecatedversion:warning="This field has been deprecated since 0.9.0"
 	// +optional
 	UpdateStrategy *UpdateStrategy `json:"updateStrategy,omitempty"`
 
-	// userResourceRefs defines the user-defined volumes.
+	// Indicates the InstanceUpdateStrategy that will be
+	// employed to update Pods in the InstanceSet when a revision is made to
+	// Template.
+	//
+	// +optional
+	InstanceUpdateStrategy *InstanceUpdateStrategy `json:"instanceUpdateStrategy,omitempty"`
+
+	// Controls the concurrency of pods during initial scale up, when replacing pods on nodes,
+	// or when scaling down. It only used when `PodManagementPolicy` is set to `Parallel`.
+	// The default Concurrency is 100%.
+	//
+	// +optional
+	ParallelPodManagementConcurrency *intstr.IntOrString `json:"parallelPodManagementConcurrency,omitempty"`
+
+	// PodUpdatePolicy indicates how pods should be updated
+	//
+	// - `StrictInPlace` indicates that only allows in-place upgrades.
+	// Any attempt to modify other fields will be rejected.
+	// - `PreferInPlace` indicates that we will first attempt an in-place upgrade of the Pod.
+	// If that fails, it will fall back to the ReCreate, where pod will be recreated.
+	// Default value is "PreferInPlace"
+	//
+	// +kubebuilder:validation:Enum={StrictInPlace,PreferInPlace}
+	// +optional
+	PodUpdatePolicy *workloads.PodUpdatePolicyType `json:"podUpdatePolicy,omitempty"`
+
+	// Allows users to specify custom ConfigMaps and Secrets to be mounted as volumes
+	// in the Cluster's Pods.
+	// This is useful in scenarios where users need to provide additional resources to the Cluster, such as:
+	//
+	// - Mounting custom scripts or configuration files during Cluster startup.
+	// - Mounting Secrets as volumes to provide sensitive information, like S3 AK/SK, to the Cluster.
+	//
 	// +optional
 	UserResourceRefs *UserResourceRefs `json:"userResourceRefs,omitempty"`
 
-	// RsmTransformPolicy defines the policy generate sts using rsm.
-	// ToSts: rsm transforms to statefulSet
-	// ToPod: rsm transforms to pods
-	// +kubebuilder:validation:Required
-	// +kubebuilder:default=ToSts
+	// Allows for the customization of configuration values for each instance within a Component.
+	// An instance represent a single replica (Pod and associated K8s resources like PVCs, Services, and ConfigMaps).
+	// While instances typically share a common configuration as defined in the ClusterComponentSpec,
+	// they can require unique settings in various scenarios:
+	//
+	// For example:
+	// - A database Component might require different resource allocations for primary and secondary instances,
+	//   with primaries needing more resources.
+	// - During a rolling upgrade, a Component may first update the image for one or a few instances,
+	//   and then update the remaining instances after verifying that the updated instances are functioning correctly.
+	//
+	// InstanceTemplate allows for specifying these unique configurations per instance.
+	// Each instance's name is constructed using the pattern: $(component.name)-$(template.name)-$(ordinal),
+	// starting with an ordinal of 0.
+	// It is crucial to maintain unique names for each InstanceTemplate to avoid conflicts.
+	//
+	// The sum of replicas across all InstanceTemplates should not exceed the total number of replicas specified for the Component.
+	// Any remaining replicas will be generated using the default template and will follow the default naming rules.
+	//
 	// +optional
-	RsmTransformPolicy workloads.RsmTransformPolicy `json:"rsmTransformPolicy,omitempty"`
+	// +patchMergeKey=name
+	// +patchStrategy=merge,retainKeys
+	// +listType=map
+	// +listMapKey=name
+	Instances []InstanceTemplate `json:"instances,omitempty" patchStrategy:"merge,retainKeys" patchMergeKey:"name"`
 
-	// Nodes defines the list of nodes that pods can schedule
-	// If the RsmTransformPolicy is specified as ToPod,the list of nodes will be used. If the list of nodes is empty,
-	// no specific node will be assigned. However, if the list of node is filled, all pods will be evenly scheduled
-	// across the nodes in the list.
+	// Specifies the names of instances to be transitioned to offline status.
+	//
+	// Marking an instance as offline results in the following:
+	//
+	// 1. The associated Pod is stopped, and its PersistentVolumeClaim (PVC) is retained for potential
+	//    future reuse or data recovery, but it is no longer actively used.
+	// 2. The ordinal number assigned to this instance is preserved, ensuring it remains unique
+	//    and avoiding conflicts with new instances.
+	//
+	// Setting instances to offline allows for a controlled scale-in process, preserving their data and maintaining
+	// ordinal consistency within the Cluster.
+	// Note that offline instances and their associated resources, such as PVCs, are not automatically deleted.
+	// The administrator must manually manage the cleanup and removal of these resources when they are no longer needed.
+	//
 	// +optional
-	Nodes []types.NodeName `json:"nodes,omitempty"`
+	OfflineInstances []string `json:"offlineInstances,omitempty"`
 
-	// Instances defines the list of instance to be deleted priorly
-	// If the RsmTransformPolicy is specified as ToPod,the list of instances will be used.
+	// Determines whether metrics exporter information is annotated on the Component's headless Service.
+	//
+	// If set to true, the following annotations will not be patched into the Service:
+	//
+	// - "monitor.kubeblocks.io/path"
+	// - "monitor.kubeblocks.io/port"
+	// - "monitor.kubeblocks.io/scheme"
+	//
+	// These annotations allow the Prometheus installed by KubeBlocks to discover and scrape metrics from the exporter.
+	//
 	// +optional
-	Instances []string `json:"instances,omitempty"`
-}
+	DisableExporter *bool `json:"disableExporter,omitempty"`
 
-// GetMinAvailable wraps the 'prefer' value return. As for component replicaCount <= 1, it will return 0,
-// and as for replicaCount=2 it will return 1.
-func (r *ClusterComponentSpec) GetMinAvailable(prefer *intstr.IntOrString) *intstr.IntOrString {
-	if r == nil || r.NoCreatePDB || prefer == nil {
-		return nil
-	}
-	if r.Replicas <= 1 {
-		m := intstr.FromInt(0)
-		return &m
-	} else if r.Replicas == 2 {
-		m := intstr.FromInt(1)
-		return &m
-	}
-	return prefer
+	// Deprecated since v0.9
+	// Determines whether metrics exporter information is annotated on the Component's headless Service.
+	//
+	// If set to true, the following annotations will be patched into the Service:
+	//
+	// - "monitor.kubeblocks.io/path"
+	// - "monitor.kubeblocks.io/port"
+	// - "monitor.kubeblocks.io/scheme"
+	//
+	// These annotations allow the Prometheus installed by KubeBlocks to discover and scrape metrics from the exporter.
+	//
+	// +optional
+	// +kubebuilder:deprecatedversion:warning="This field has been deprecated since 0.10.0"
+	Monitor *bool `json:"monitor,omitempty"`
+
+	// Stop the Component.
+	// If set, all the computing resources will be released.
+	//
+	// +optional
+	Stop *bool `json:"stop,omitempty"`
 }
 
 type ComponentMessageMap map[string]string
 
-// ClusterComponentStatus records components status.
+// ClusterComponentStatus records Component status.
 type ClusterComponentStatus struct {
-	// phase describes the phase of the component and the detail information of the phases are as following:
-	// Creating: `Creating` is a special `Updating` with previous phase `empty`(means "") or `Creating`.
-	// Running: component replicas > 0 and all pod specs are latest with a Running state.
-	// Updating: component replicas > 0 and has no failed pods. the component is being updated.
-	// Abnormal: component replicas > 0 but having some failed pods. the component basically works but in a fragile state.
-	// Failed: component replicas > 0 but having some failed pods. the component doesn't work anymore.
-	// Stopping: component replicas = 0 and has terminating pods.
-	// Stopped: component replicas = 0 and all pods have been deleted.
-	// Deleting: the component is being deleted.
+	// Specifies the current state of the Component.
 	Phase ClusterComponentPhase `json:"phase,omitempty"`
 
-	// message records the component details message in current phase.
-	// Keys are podName or deployName or statefulSetName. The format is `ObjectKind/Name`.
+	// Records detailed information about the Component in its current phase.
+	// The keys are either podName, deployName, or statefulSetName, formatted as 'ObjectKind/Name'.
+	//
 	// +optional
 	Message ComponentMessageMap `json:"message,omitempty"`
 
-	// podsReady checks if all pods of the component are ready.
+	// Checks if all Pods of the Component are ready.
+	//
 	// +optional
 	PodsReady *bool `json:"podsReady,omitempty"`
 
-	// podsReadyTime what time point of all component pods are ready,
-	// this time is the ready time of the last component pod.
+	// Indicates the time when all Component Pods became ready.
+	// This is the readiness time of the last Component Pod.
+	//
 	// +optional
 	PodsReadyTime *metav1.Time `json:"podsReadyTime,omitempty"`
 
-	// consensusSetStatus specifies the mapping of role and pod name.
-	// +optional
-	// +kubebuilder:deprecatedversion:warning="This field is deprecated from KB 0.7.0, use MembersStatus instead."
-	ConsensusSetStatus *ConsensusSetStatus `json:"consensusSetStatus,omitempty"`
-
-	// replicationSetStatus specifies the mapping of role and pod name.
-	// +optional
-	// +kubebuilder:deprecatedversion:warning="This field is deprecated from KB 0.7.0, use MembersStatus instead."
-	ReplicationSetStatus *ReplicationSetStatus `json:"replicationSetStatus,omitempty"`
-
-	// members' status.
+	// Represents the status of the members.
+	//
 	// +optional
 	MembersStatus []workloads.MemberStatus `json:"membersStatus,omitempty"`
 }
 
-type ConsensusSetStatus struct {
-	// Leader status.
-	// +kubebuilder:validation:Required
-	Leader ConsensusMemberStatus `json:"leader"`
-
-	// Followers status.
-	// +optional
-	Followers []ConsensusMemberStatus `json:"followers,omitempty"`
-
-	// Learner status.
-	// +optional
-	Learner *ConsensusMemberStatus `json:"learner,omitempty"`
-}
-
-type ConsensusMemberStatus struct {
-	// Defines the role name.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:default=leader
-	Name string `json:"name"`
-
-	// accessMode defines what service this pod provides.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:default=ReadWrite
-	AccessMode AccessMode `json:"accessMode"`
-
-	// Pod name.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:default=Unknown
-	Pod string `json:"pod"`
-}
-
-type ReplicationSetStatus struct {
-	// Primary status.
-	// +kubebuilder:validation:Required
-	Primary ReplicationMemberStatus `json:"primary"`
-
-	// Secondaries status.
-	// +optional
-	Secondaries []ReplicationMemberStatus `json:"secondaries,omitempty"`
-}
-
-type ReplicationMemberStatus struct {
-	// Pod name.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:default=Unknown
-	Pod string `json:"pod"`
-}
-
+// ClusterSwitchPolicy defines the switch policy for a Cluster.
+//
+// Deprecated since v0.9.
 type ClusterSwitchPolicy struct {
-	// TODO other attribute extensions
-
-	// clusterSwitchPolicy defines type of the switchPolicy when workloadType is Replication.
-	// MaximumAvailability: [WIP] when the primary is active, do switch if the synchronization delay = 0 in the user-defined lagProbe data delay detection logic, otherwise do not switch. The primary is down, switch immediately. It will be available in future versions.
-	// MaximumDataProtection: [WIP] when the primary is active, do switch if synchronization delay = 0 in the user-defined lagProbe data lag detection logic, otherwise do not switch. If the primary is down, if it can be judged that the primary and secondary data are consistent, then do the switch, otherwise do not switch. It will be available in future versions.
-	// Noop: KubeBlocks will not perform high-availability switching on components. Users need to implement HA by themselves or integrate open source HA solution.
+	// Type specifies the type of switch policy to be applied.
+	//
 	// +kubebuilder:validation:Required
 	// +kubebuilder:default=Noop
 	// +optional
@@ -535,10 +980,22 @@ type ClusterSwitchPolicy struct {
 }
 
 type ClusterComponentVolumeClaimTemplate struct {
-	// Reference `ClusterDefinition.spec.componentDefs.containers.volumeMounts.name`.
+	// Refers to the name of a volumeMount defined in either:
+	//
+	// - `componentDefinition.spec.runtime.containers[*].volumeMounts`
+	// - `clusterDefinition.spec.componentDefs[*].podSpec.containers[*].volumeMounts` (deprecated)
+	//
+	// The value of `name` must match the `name` field of a volumeMount specified in the corresponding `volumeMounts` array.
+	//
 	// +kubebuilder:validation:Required
 	Name string `json:"name"`
-	// spec defines the desired characteristics of a volume requested by a pod author.
+
+	// Defines the desired characteristics of a PersistentVolumeClaim that will be created for the volume
+	// with the mount name specified in the `name` field.
+	//
+	// When a Pod is created for this ClusterComponent, a new PVC will be created based on the specification
+	// defined in the `spec` field. The PVC will be associated with the volume mount specified by the `name` field.
+	//
 	// +optional
 	Spec PersistentVolumeClaimSpec `json:"spec,omitempty"`
 }
@@ -553,24 +1010,30 @@ func (r *ClusterComponentVolumeClaimTemplate) toVolumeClaimTemplate() corev1.Per
 }
 
 type PersistentVolumeClaimSpec struct {
-	// accessModes contains the desired access modes the volume should have.
+	// Contains the desired access modes the volume should have.
 	// More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#access-modes-1.
+	//
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +optional
 	AccessModes []corev1.PersistentVolumeAccessMode `json:"accessModes,omitempty" protobuf:"bytes,1,rep,name=accessModes,casttype=PersistentVolumeAccessMode"`
-	// resources represents the minimum resources the volume should have.
-	// If RecoverVolumeExpansionFailure feature is enabled users are allowed to specify resource requirements
-	// that are lower than previous value but must still be higher than capacity recorded in the
-	// status field of the claim.
+
+	// Represents the minimum resources the volume should have.
+	// If the RecoverVolumeExpansionFailure feature is enabled, users are allowed to specify resource requirements that
+	// are lower than the previous value but must still be higher than the capacity recorded in the status field of the claim.
 	// More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#resources.
+	//
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +optional
-	Resources corev1.ResourceRequirements `json:"resources,omitempty" protobuf:"bytes,2,opt,name=resources"`
-	// storageClassName is the name of the StorageClass required by the claim.
+	Resources corev1.VolumeResourceRequirements `json:"resources,omitempty" protobuf:"bytes,2,opt,name=resources"`
+
+	// The name of the StorageClass required by the claim.
 	// More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#class-1.
+	//
 	// +optional
 	StorageClassName *string `json:"storageClassName,omitempty" protobuf:"bytes,5,opt,name=storageClassName"`
-	// volumeMode defines what type of volume is required by the claim.
+
+	// Defines what type of volume is required by the claim, either Block or Filesystem.
+	//
 	// +optional
 	VolumeMode *corev1.PersistentVolumeMode `json:"volumeMode,omitempty" protobuf:"bytes,6,opt,name=volumeMode,casttype=PersistentVolumeMode"`
 }
@@ -598,71 +1061,180 @@ func (r *PersistentVolumeClaimSpec) getStorageClassName(preferSC string) *string
 }
 
 type Affinity struct {
-	// podAntiAffinity describes the anti-affinity level of pods within a component.
-	// Preferred means try spread pods by `TopologyKeys`.
-	// Required means must spread pods by `TopologyKeys`.
+	// Specifies the anti-affinity level of Pods within a Component.
+	// It determines how pods should be spread across nodes to improve availability and performance.
+	// It can have the following values: `Preferred` and `Required`.
+	// The default value is `Preferred`.
+	//
 	// +kubebuilder:default=Preferred
 	// +optional
 	PodAntiAffinity PodAntiAffinity `json:"podAntiAffinity,omitempty"`
 
-	// topologyKey is the key of node labels.
-	// Nodes that have a label with this key and identical values are considered to be in the same topology.
-	// It's used as the topology domain for pod anti-affinity and pod spread constraint.
-	// Some well-known label keys, such as "kubernetes.io/hostname" and "topology.kubernetes.io/zone"
-	// are often used as TopologyKey, as well as any other custom label key.
+	// Represents the key of node labels used to define the topology domain for Pod anti-affinity
+	// and Pod spread constraints.
+	//
+	// In K8s, a topology domain is a set of nodes that have the same value for a specific label key.
+	// Nodes with labels containing any of the specified TopologyKeys and identical values are considered
+	// to be in the same topology domain.
+	//
+	// Note: The concept of topology in the context of K8s TopologyKeys is different from the concept of
+	// topology in the ClusterDefinition.
+	//
+	// When a Pod has anti-affinity or spread constraints specified, Kubernetes will attempt to schedule the
+	// Pod on nodes with different values for the specified TopologyKeys.
+	// This ensures that Pods are spread across different topology domains, promoting high availability and
+	// reducing the impact of node failures.
+	//
+	// Some well-known label keys, such as `kubernetes.io/hostname` and `topology.kubernetes.io/zone`,
+	// are often used as TopologyKey.
+	// These keys represent the hostname and zone of a node, respectively.
+	// By including these keys in the TopologyKeys list, Pods will be spread across nodes with
+	// different hostnames or zones.
+	//
+	// In addition to the well-known keys, users can also specify custom label keys as TopologyKeys.
+	// This allows for more flexible and custom topology definitions based on the specific needs
+	// of the application or environment.
+	//
+	// The TopologyKeys field is a slice of strings, where each string represents a label key.
+	// The order of the keys in the slice does not matter.
+	//
 	// +listType=set
 	// +optional
 	TopologyKeys []string `json:"topologyKeys,omitempty"`
 
-	// nodeLabels describes that pods must be scheduled to the nodes with the specified node labels.
+	// Indicates the node labels that must be present on nodes for pods to be scheduled on them.
+	// It is a map where the keys are the label keys and the values are the corresponding label values.
+	// Pods will only be scheduled on nodes that have all the specified labels with the corresponding values.
+	//
+	// For example, if NodeLabels is set to {"nodeType": "ssd", "environment": "production"},
+	// pods will only be scheduled on nodes that have both the "nodeType" label with value "ssd"
+	// and the "environment" label with value "production".
+	//
+	// This field allows users to control Pod placement based on specific node labels.
+	// It can be used to ensure that Pods are scheduled on nodes with certain characteristics,
+	// such as specific hardware (e.g., SSD), environment (e.g., production, staging),
+	// or any other custom labels assigned to nodes.
+	//
 	// +optional
 	NodeLabels map[string]string `json:"nodeLabels,omitempty"`
 
-	// tenancy describes how pods are distributed across node.
-	// SharedNode means multiple pods may share the same node.
-	// DedicatedNode means each pod runs on their own dedicated node.
+	// Determines the level of resource isolation between Pods.
+	// It can have the following values: `SharedNode` and `DedicatedNode`.
+	//
+	// - SharedNode: Allow that multiple Pods may share the same node, which is the default behavior of K8s.
+	// - DedicatedNode: Each Pod runs on a dedicated node, ensuring that no two Pods share the same node.
+	//   In other words, if a Pod is already running on a node, no other Pods will be scheduled on that node.
+	//   Which provides a higher level of isolation and resource guarantee for Pods.
+	//
+	//  The default value is `SharedNode`.
+	//
 	// +kubebuilder:default=SharedNode
 	// +optional
 	Tenancy TenancyType `json:"tenancy,omitempty"`
 }
 
+type SchedulingPolicy struct {
+	// If specified, the Pod will be dispatched by specified scheduler.
+	// If not specified, the Pod will be dispatched by default scheduler.
+	//
+	// +optional
+	SchedulerName string `json:"schedulerName,omitempty"`
+
+	// NodeSelector is a selector which must be true for the Pod to fit on a node.
+	// Selector which must match a node's labels for the Pod to be scheduled on that node.
+	// More info: https://kubernetes.io/docs/concepts/configuration/assign-pod-node/
+	//
+	// +optional
+	// +mapType=atomic
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+
+	// NodeName is a request to schedule this Pod onto a specific node. If it is non-empty,
+	// the scheduler simply schedules this Pod onto that node, assuming that it fits resource
+	// requirements.
+	//
+	// +optional
+	NodeName string `json:"nodeName,omitempty"`
+
+	// Specifies a group of affinity scheduling rules of the Cluster, including NodeAffinity, PodAffinity, and PodAntiAffinity.
+	//
+	// +optional
+	Affinity *corev1.Affinity `json:"affinity,omitempty"`
+
+	// Allows Pods to be scheduled onto nodes with matching taints.
+	// Each toleration in the array allows the Pod to tolerate node taints based on
+	// specified `key`, `value`, `effect`, and `operator`.
+	//
+	// - The `key`, `value`, and `effect` identify the taint that the toleration matches.
+	// - The `operator` determines how the toleration matches the taint.
+	//
+	// Pods with matching tolerations are allowed to be scheduled on tainted nodes, typically reserved for specific purposes.
+	//
+	// +optional
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+
+	// TopologySpreadConstraints describes how a group of Pods ought to spread across topology
+	// domains. Scheduler will schedule Pods in a way which abides by the constraints.
+	// All topologySpreadConstraints are ANDed.
+	//
+	// +optional
+	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
+}
+
 type TLSConfig struct {
+	// A boolean flag that indicates whether the Component should use Transport Layer Security (TLS)
+	// for secure communication.
+	// When set to true, the Component will be configured to use TLS encryption for its network connections.
+	// This ensures that the data transmitted between the Component and its clients or other Components is encrypted
+	// and protected from unauthorized access.
+	// If TLS is enabled, the Component may require additional configuration,
+	// such as specifying TLS certificates and keys, to properly set up the secure communication channel.
+	//
 	// +kubebuilder:default=false
 	// +optional
 	Enable bool `json:"enable,omitempty"`
 
+	// Specifies the configuration for the TLS certificates issuer.
+	// It allows defining the issuer name and the reference to the secret containing the TLS certificates and key.
+	// The secret should contain the CA certificate, TLS certificate, and private key in the specified keys.
+	// Required when TLS is enabled.
+	//
 	// +optional
 	Issuer *Issuer `json:"issuer,omitempty"`
 }
 
-// Issuer defines Tls certs issuer
+// Issuer defines the TLS certificates issuer for the Cluster.
 type Issuer struct {
-	// Name of issuer.
-	// Options supported:
-	// - KubeBlocks - Certificates signed by KubeBlocks Operator.
-	// - UserProvided - User provided own CA-signed certificates.
+	// The issuer for TLS certificates.
+	// It only allows two enum values: `KubeBlocks` and `UserProvided`.
+	//
+	// - `KubeBlocks` indicates that the self-signed TLS certificates generated by the KubeBlocks Operator will be used.
+	// - `UserProvided` means that the user is responsible for providing their own CA, Cert, and Key.
+	//   In this case, the user-provided CA certificate, server certificate, and private key will be used
+	//   for TLS communication.
+	//
 	// +kubebuilder:validation:Enum={KubeBlocks, UserProvided}
 	// +kubebuilder:default=KubeBlocks
 	// +kubebuilder:validation:Required
 	Name IssuerName `json:"name"`
 
-	// secretRef. TLS certs Secret reference
-	// required when from is UserProvided
+	// SecretRef is the reference to the secret that contains user-provided certificates.
+	// It is required when the issuer is set to `UserProvided`.
+	//
 	// +optional
 	SecretRef *TLSSecretRef `json:"secretRef,omitempty"`
 }
 
 // TLSSecretRef defines Secret contains Tls certs
 type TLSSecretRef struct {
-	// Name of the Secret
+	// Name of the Secret that contains user-provided certificates.
 	// +kubebuilder:validation:Required
 	Name string `json:"name"`
 
-	// CA cert key in Secret
+	// Key of CA cert in Secret
 	// +kubebuilder:validation:Required
 	CA string `json:"ca"`
 
-	// Cert key in Secret
+	// Key of Cert in Secret
 	// +kubebuilder:validation:Required
 	Cert string `json:"cert"`
 
@@ -672,96 +1244,238 @@ type TLSSecretRef struct {
 }
 
 type ClusterComponentService struct {
-	// Service name
+	// References the ComponentService name defined in the `componentDefinition.spec.services[*].name`.
+	//
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MaxLength=15
+	// +kubebuilder:validation:MaxLength=25
 	Name string `json:"name"`
 
-	// serviceType determines how the Service is exposed. Valid
-	// options are ClusterIP, NodePort, and LoadBalancer.
-	// "ClusterIP" allocates a cluster-internal IP address for load-balancing
-	// to endpoints. Endpoints are determined by the selector or if that is not
-	// specified, they are determined by manual construction of an Endpoints object or
-	// EndpointSlice objects. If clusterIP is "None", no virtual IP is
-	// allocated and the endpoints are published as a set of endpoints rather
-	// than a virtual IP.
-	// "NodePort" builds on ClusterIP and allocates a port on every node which
-	// routes to the same endpoints as the clusterIP.
-	// "LoadBalancer" builds on NodePort and creates an external load-balancer
-	// (if supported in the current cloud) which routes to the same endpoints
-	// as the clusterIP.
-	// More info: https://kubernetes.io/docs/concepts/services-networking/service/#publishing-services-service-types.
+	// Determines how the Service is exposed. Valid options are `ClusterIP`, `NodePort`, and `LoadBalancer`.
+	//
+	// - `ClusterIP` allocates a Cluster-internal IP address for load-balancing to endpoints.
+	//    Endpoints are determined by the selector or if that is not specified,
+	//    they are determined by manual construction of an Endpoints object or EndpointSlice objects.
+	// - `NodePort` builds on ClusterIP and allocates a port on every node which routes to the same endpoints as the ClusterIP.
+	// - `LoadBalancer` builds on NodePort and creates an external load-balancer (if supported in the current cloud)
+	//    which routes to the same endpoints as the ClusterIP.
+	//
+	// Note: although K8s Service type allows the 'ExternalName' type, it is not a valid option for ClusterComponentService.
+	//
+	// For more info, see:
+	// https://kubernetes.io/docs/concepts/services-networking/service/#publishing-services-service-types.
+	//
 	// +kubebuilder:default=ClusterIP
 	// +kubebuilder:validation:Enum={ClusterIP,NodePort,LoadBalancer}
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +optional
 	ServiceType corev1.ServiceType `json:"serviceType,omitempty"`
 
-	// If ServiceType is LoadBalancer, cloud provider related parameters can be put here
+	// If ServiceType is LoadBalancer, cloud provider related parameters can be put here.
 	// More info: https://kubernetes.io/docs/concepts/services-networking/service/#loadbalancer.
+	//
 	// +optional
 	Annotations map[string]string `json:"annotations,omitempty"`
+
+	// Indicates whether to generate individual Services for each Pod.
+	// If set to true, a separate Service will be created for each Pod in the Cluster.
+	//
+	// +kubebuilder:default=false
+	// +optional
+	PodService *bool `json:"podService,omitempty"`
 }
 
+type ComponentSystemAccount struct {
+	// The name of the system account.
+	//
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+
+	// Specifies the policy for generating the account's password.
+	//
+	// This field is immutable once set.
+	//
+	// +optional
+	PasswordConfig *PasswordConfig `json:"passwordConfig,omitempty"`
+
+	// Refers to the secret from which data will be copied to create the new account.
+	//
+	// This field is immutable once set.
+	//
+	// +optional
+	SecretRef *ProvisionSecretRef `json:"secretRef,omitempty"`
+}
+
+// ClusterComponentConfig represents a config with its source bound.
+type ClusterComponentConfig struct {
+	// The name of the config.
+	//
+	// +optional
+	Name *string `json:"name,omitempty"`
+
+	// The source of the config.
+	ClusterComponentConfigSource `json:",inline"`
+}
+
+// ClusterComponentConfigSource represents the source of a config.
+type ClusterComponentConfigSource struct {
+	// ConfigMap source for the config.
+	//
+	// +optional
+	ConfigMap *corev1.ConfigMapVolumeSource `json:"configMap,omitempty"`
+
+	// TODO: support more diverse sources:
+	// - Config template of other components within the same cluster
+	// - Config template of components from other clusters
+	// - Secret
+	// - Local file
+}
+
+// ClassDefRef is deprecated since v0.9.
 type ClassDefRef struct {
-	// Name refers to the name of the ComponentClassDefinition.
+	// Specifies the name of the ComponentClassDefinition.
+	//
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern:=`^[a-z0-9]([a-z0-9\.\-]*[a-z0-9])?$`
 	// +optional
 	Name string `json:"name,omitempty"`
 
-	// Class refers to the name of the class that is defined in the ComponentClassDefinition.
+	// Defines the name of the class that is defined in the ComponentClassDefinition.
+	//
 	// +kubebuilder:validation:Required
 	Class string `json:"class"`
 }
 
-type ClusterMonitor struct {
-
-	// monitoringInterval specifies interval of monitoring, no monitor if set to 0
-	// +kubebuilder:validation:XIntOrString
-	// +optional
-	MonitoringInterval *intstr.IntOrString `json:"monitoringInterval,omitempty"`
-}
-
+// ClusterNetwork is deprecated since v0.9.
 type ClusterNetwork struct {
-
-	// hostNetworkAccessible specifies whether host network is accessible. It defaults to false
+	// Indicates whether the host network can be accessed. By default, this is set to false.
+	//
 	// +kubebuilder:default=false
 	// +optional
 	HostNetworkAccessible bool `json:"hostNetworkAccessible,omitempty"`
 
-	// publiclyAccessible specifies whether it is publicly accessible. It defaults to false
+	// Indicates whether the network is accessible to the public. By default, this is set to false.
+	//
 	// +kubebuilder:default=false
 	// +optional
 	PubliclyAccessible bool `json:"publiclyAccessible,omitempty"`
 }
 
 type ServiceRef struct {
-	// name of the service reference declaration. references the serviceRefDeclaration name defined in clusterDefinition.componentDefs[*].serviceRefDeclarations[*].name
+	// Specifies the identifier of the service reference declaration.
+	// It corresponds to the serviceRefDeclaration name defined in either:
+	//
+	// - `componentDefinition.spec.serviceRefDeclarations[*].name`
+	// - `clusterDefinition.spec.componentDefs[*].serviceRefDeclarations[*].name` (deprecated)
+	//
 	// +kubebuilder:validation:Required
 	Name string `json:"name"`
 
-	// namespace defines the namespace of the referenced Cluster or the namespace of the referenced ServiceDescriptor object.
-	// If not set, the referenced Cluster and ServiceDescriptor will be searched in the namespace of the current cluster by default.
+	// Specifies the namespace of the referenced Cluster or the namespace of the referenced ServiceDescriptor object.
+	// If not provided, the referenced Cluster and ServiceDescriptor will be searched in the namespace of the current
+	// Cluster by default.
+	//
 	// +optional
-	Namespace string `json:"namespace,omitempty" protobuf:"bytes,3,opt,name=namespace"`
+	Namespace string `json:"namespace,omitempty"`
 
-	// When referencing a service provided by other KubeBlocks cluster, you need to provide the name of the Cluster being referenced.
-	// By default, when other KubeBlocks Cluster are referenced, the ClusterDefinition.spec.connectionCredential secret corresponding to the referenced Cluster will be used to bind to the current component.
-	// Currently, if a KubeBlocks cluster is to be referenced, the connection credential secret should include and correspond to the following fields: endpoint, port, username, and password.
-	// Under this referencing approach, the ServiceKind and ServiceVersion of service reference declaration defined in the ClusterDefinition will not be validated.
-	// If both Cluster and ServiceDescriptor are specified, the Cluster takes precedence.
+	// Specifies the name of the KubeBlocks Cluster being referenced.
+	// This is used when services from another KubeBlocks Cluster are consumed.
+	//
+	// By default, the referenced KubeBlocks Cluster's `clusterDefinition.spec.connectionCredential`
+	// will be utilized to bind to the current Component. This credential should include:
+	// `endpoint`, `port`, `username`, and `password`.
+	//
+	// Note:
+	//
+	// - The `ServiceKind` and `ServiceVersion` specified in the service reference within the
+	//   ClusterDefinition are not validated when using this approach.
+	// - If both `cluster` and `serviceDescriptor` are present, `cluster` will take precedence.
+	//
+	// Deprecated since v0.9 since `clusterDefinition.spec.connectionCredential` is deprecated,
+	// use `clusterServiceSelector` instead.
+	// This field is maintained for backward compatibility and its use is discouraged.
+	// Existing usage should be updated to the current preferred approach to avoid compatibility issues in future releases.
+	//
+	// +kubebuilder:deprecatedversion:warning="This field has been deprecated since 0.9.0"
 	// +optional
 	Cluster string `json:"cluster,omitempty"`
 
-	// serviceDescriptor defines the service descriptor of the service provided by external sources.
-	// When referencing a service provided by external sources, you need to provide the ServiceDescriptor object name to establish the service binding.
-	// And serviceDescriptor is the name of the ServiceDescriptor object, furthermore, the ServiceDescriptor.spec.serviceKind and ServiceDescriptor.spec.serviceVersion
-	// should match clusterDefinition.componentDefs[*].serviceRefDeclarations[*].serviceRefDeclarationSpecs[*].serviceKind
-	// and the regular expression defines in clusterDefinition.componentDefs[*].serviceRefDeclarations[*].serviceRefDeclarationSpecs[*].serviceVersion.
-	// If both Cluster and ServiceDescriptor are specified, the Cluster takes precedence.
+	// References a service provided by another KubeBlocks Cluster.
+	// It specifies the ClusterService and the account credentials needed for access.
+	//
+	// +optional
+	ClusterServiceSelector *ServiceRefClusterSelector `json:"clusterServiceSelector,omitempty"`
+
+	// Specifies the name of the ServiceDescriptor object that describes a service provided by external sources.
+	//
+	// When referencing a service provided by external sources, a ServiceDescriptor object is required to establish
+	// the service binding.
+	// The `serviceDescriptor.spec.serviceKind` and `serviceDescriptor.spec.serviceVersion` should match the serviceKind
+	// and serviceVersion declared in the definition.
+	//
+	// If both `cluster` and `serviceDescriptor` are specified, the `cluster` takes precedence.
+	//
 	// +optional
 	ServiceDescriptor string `json:"serviceDescriptor,omitempty"`
+}
+
+type ServiceRefClusterSelector struct {
+	// The name of the Cluster being referenced.
+	//
+	// +kubebuilder:validation:Required
+	Cluster string `json:"cluster"`
+
+	// Identifies a ClusterService from the list of Services defined in `cluster.spec.services` of the referenced Cluster.
+	//
+	// +optional
+	Service *ServiceRefServiceSelector `json:"service,omitempty"`
+
+	// Specifies the SystemAccount to authenticate and establish a connection with the referenced Cluster.
+	// The SystemAccount should be defined in `componentDefinition.spec.systemAccounts`
+	// of the Component providing the service in the referenced Cluster.
+	//
+	// +optional
+	Credential *ServiceRefCredentialSelector `json:"credential,omitempty"`
+}
+
+type ServiceRefServiceSelector struct {
+	// The name of the Component where the Service resides in.
+	//
+	// It is required when referencing a Component's Service.
+	//
+	// +optional
+	Component string `json:"component,omitempty"`
+
+	// The name of the Service to be referenced.
+	//
+	// Leave it empty to reference the default Service. Set it to "headless" to reference the default headless Service.
+	//
+	// If the referenced Service is of pod-service type (a Service per Pod), there will be multiple Service objects matched,
+	// and the resolved value will be presented in the following format: service1.name,service2.name...
+	//
+	// +kubebuilder:validation:Required
+	Service string `json:"service"`
+
+	// The port name of the Service to be referenced.
+	//
+	// If there is a non-zero node-port exist for the matched Service port, the node-port will be selected first.
+	//
+	// If the referenced Service is of pod-service type (a Service per Pod), there will be multiple Service objects matched,
+	// and the resolved value will be presented in the following format: service1.name:port1,service2.name:port2...
+	//
+	// +optional
+	Port string `json:"port,omitempty"`
+}
+
+type ServiceRefCredentialSelector struct {
+	// The name of the Component where the credential resides in.
+	//
+	// +kubebuilder:validation:Required
+	Component string `json:"component"`
+
+	// The name of the credential (SystemAccount) to reference.
+	//
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
 }
 
 // +genclient
@@ -775,7 +1489,30 @@ type ServiceRef struct {
 // +kubebuilder:printcolumn:name="STATUS",type="string",JSONPath=".status.phase",description="Cluster Status."
 // +kubebuilder:printcolumn:name="AGE",type="date",JSONPath=".metadata.creationTimestamp"
 
-// Cluster is the Schema for the clusters API.
+// Cluster offers a unified management interface for a wide variety of database and storage systems:
+//
+// - Relational databases: MySQL, PostgreSQL, MariaDB
+// - NoSQL databases: Redis, MongoDB
+// - KV stores: ZooKeeper, etcd
+// - Analytics systems: ElasticSearch, OpenSearch, ClickHouse, Doris, StarRocks, Solr
+// - Message queues: Kafka, Pulsar
+// - Distributed SQL: TiDB, OceanBase
+// - Vector databases: Qdrant, Milvus, Weaviate
+// - Object storage: Minio
+//
+// KubeBlocks utilizes an abstraction layer to encapsulate the characteristics of these diverse systems.
+// A Cluster is composed of multiple Components, each defined by vendors or KubeBlocks Addon developers via ComponentDefinition,
+// arranged in Directed Acyclic Graph (DAG) topologies.
+// The topologies, defined in a ClusterDefinition, coordinate reconciliation across Cluster's lifecycle phases:
+// Creating, Running, Updating, Stopping, Stopped, Deleting.
+// Lifecycle management ensures that each Component operates in harmony, executing appropriate actions at each lifecycle stage.
+//
+// For sharded-nothing architecture, the Cluster supports managing multiple shards,
+// each shard managed by a separate Component, supporting dynamic resharding.
+//
+// The Cluster object is aimed to maintain the overall integrity and availability of a database cluster,
+// serves as the central control point, abstracting the complexity of multiple-component management,
+// and providing a unified interface for cluster-wide operations.
 type Cluster struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -797,18 +1534,18 @@ func init() {
 	SchemeBuilder.Register(&Cluster{}, &ClusterList{})
 }
 
-func (r Cluster) IsDeleting() bool {
+func (r *Cluster) IsDeleting() bool {
 	if r.GetDeletionTimestamp().IsZero() {
 		return false
 	}
 	return r.Spec.TerminationPolicy != DoNotTerminate
 }
 
-func (r Cluster) IsUpdating() bool {
+func (r *Cluster) IsUpdating() bool {
 	return r.Status.ObservedGeneration != r.Generation
 }
 
-func (r Cluster) IsStatusUpdating() bool {
+func (r *Cluster) IsStatusUpdating() bool {
 	return !r.IsDeleting() && !r.IsUpdating()
 }
 
@@ -874,6 +1611,15 @@ func (r ClusterSpec) GetComponentByName(componentName string) *ClusterComponentS
 	return nil
 }
 
+func (r ClusterSpec) GetShardingByName(shardingName string) *ShardingSpec {
+	for _, v := range r.ShardingSpecs {
+		if v.Name == shardingName {
+			return &v
+		}
+	}
+	return nil
+}
+
 // GetComponentDefRefName gets the name of referenced component definition.
 func (r ClusterSpec) GetComponentDefRefName(componentName string) string {
 	for _, component := range r.ComponentSpecs {
@@ -882,33 +1628,6 @@ func (r ClusterSpec) GetComponentDefRefName(componentName string) string {
 		}
 	}
 	return ""
-}
-
-// ValidateEnabledLogs validates enabledLogs config in cluster.yaml, and returns metav1.Condition when detecting invalid values.
-func (r ClusterSpec) ValidateEnabledLogs(cd *ClusterDefinition) error {
-	message := make([]string, 0)
-	for _, comp := range r.ComponentSpecs {
-		invalidLogNames := cd.ValidateEnabledLogConfigs(comp.ComponentDefRef, comp.EnabledLogs)
-		if len(invalidLogNames) == 0 {
-			continue
-		}
-		message = append(message, fmt.Sprintf("EnabledLogs: %s are not defined in Component: %s of the clusterDefinition", invalidLogNames, comp.Name))
-	}
-	if len(message) > 0 {
-		return errors.New(strings.Join(message, ";"))
-	}
-	return nil
-}
-
-// GetDefNameMappingComponents returns ComponentDefRef name mapping ClusterComponentSpec.
-func (r ClusterSpec) GetDefNameMappingComponents() map[string][]ClusterComponentSpec {
-	m := map[string][]ClusterComponentSpec{}
-	for _, c := range r.ComponentSpecs {
-		v := m[c.ComponentDefRef]
-		v = append(v, c)
-		m[c.ComponentDefRef] = v
-	}
-	return m
 }
 
 // GetMessage gets message map deep copy object.
@@ -979,6 +1698,39 @@ func (r *ClusterComponentSpec) ToVolumeClaimTemplates() []corev1.PersistentVolum
 	return ts
 }
 
+func (r *ClusterComponentSpec) GetDisableExporter() *bool {
+	if r.DisableExporter != nil {
+		return r.DisableExporter
+	}
+
+	toPointer := func(b bool) *bool {
+		p := b
+		return &p
+	}
+
+	// Compatible with previous versions of kb
+	if r.Monitor != nil {
+		return toPointer(!*r.Monitor)
+	}
+	return nil
+}
+
+func (t *InstanceTemplate) GetName() string {
+	return t.Name
+}
+
+func (t *InstanceTemplate) GetReplicas() int32 {
+	if t.Replicas != nil {
+		return *t.Replicas
+	}
+	return defaultInstanceTemplateReplicas
+}
+
+// GetOrdinals TODO(free6om): Remove after resolving the circular dependencies between apps and workloads.
+func (t *InstanceTemplate) GetOrdinals() workloads.Ordinals {
+	return workloads.Ordinals{}
+}
+
 // GetClusterUpRunningPhases returns Cluster running or partially running phases.
 func GetClusterUpRunningPhases() []ClusterPhase {
 	return []ClusterPhase{
@@ -1020,4 +1772,14 @@ func GetComponentUpRunningPhase() []ClusterComponentPhase {
 // ComponentPodsAreReady checks if the pods of component are ready.
 func ComponentPodsAreReady(podsAreReady *bool) bool {
 	return podsAreReady != nil && *podsAreReady
+}
+
+// GetInstanceTemplateName get the instance template name by instance name.
+func GetInstanceTemplateName(clusterName, componentName, instanceName string) string {
+	workloadPrefix := fmt.Sprintf("%s-%s", clusterName, componentName)
+	compInsKey := instanceName[:strings.LastIndex(instanceName, "-")]
+	if compInsKey == workloadPrefix {
+		return ""
+	}
+	return strings.Replace(compInsKey, workloadPrefix+"-", "", 1)
 }

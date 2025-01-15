@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -27,7 +27,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
+	appsv1 "github.com/apecloud/kubeblocks/apis/apps/v1"
+	appsv1beta1 "github.com/apecloud/kubeblocks/apis/apps/v1beta1"
 	"github.com/apecloud/kubeblocks/pkg/configuration/core"
 	cfgutil "github.com/apecloud/kubeblocks/pkg/configuration/util"
 	"github.com/apecloud/kubeblocks/pkg/configuration/validate"
@@ -37,22 +38,43 @@ import (
 	"github.com/apecloud/kubeblocks/pkg/generics"
 )
 
-func injectTemplateEnvFrom(cluster *appsv1alpha1.Cluster, component *component.SynthesizedComponent, podSpec *corev1.PodSpec, cli client.Client, ctx context.Context, localObjs []client.Object) error {
+func injectTemplateEnvFrom(cluster *appsv1.Cluster, component *component.SynthesizedComponent, podSpec *corev1.PodSpec, cli client.Client, ctx context.Context, localObjs []client.Object) error {
 	var err error
 	var cm *corev1.ConfigMap
 
-	injectConfigmap := func(envMap map[string]string, configSpec appsv1alpha1.ComponentConfigSpec, cmName string) error {
-		envConfigMap, err := createEnvFromConfigmap(cluster, component.Name, configSpec, client.ObjectKeyFromObject(cm), envMap, ctx, cli)
+	withEnvSource := func(asSecret bool) func(name string) corev1.EnvFromSource {
+		return func(name string) corev1.EnvFromSource {
+			if asSecret {
+				return corev1.EnvFromSource{
+					SecretRef: &corev1.SecretEnvSource{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: name,
+						}}}
+			}
+			return corev1.EnvFromSource{
+				ConfigMapRef: &corev1.ConfigMapEnvSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: name,
+					}}}
+		}
+	}
+
+	injectConfigmap := func(envMap map[string]string, configSpec appsv1.ComponentConfigSpec, cmName string) error {
+		envSourceObject, err := createOrUpdateResourceFromConfigTemplate(cluster, component, configSpec, client.ObjectKeyFromObject(cm), envMap, ctx, cli, true)
 		if err != nil {
 			return core.WrapError(err, "failed to generate env configmap[%s]", cmName)
 		}
-		injectEnvFrom(podSpec.Containers, configSpec.AsEnvFrom, envConfigMap.Name)
-		injectEnvFrom(podSpec.InitContainers, configSpec.AsEnvFrom, envConfigMap.Name)
+		if toSecret(configSpec) && configSpec.VolumeName != "" {
+			podSpec.Volumes = updateSecretVolumes(podSpec.Volumes, configSpec, envSourceObject, component)
+		} else {
+			injectEnvFrom(podSpec.Containers, containersInjectedTo(configSpec), envSourceObject.GetName(), withEnvSource(toSecret(configSpec)))
+			injectEnvFrom(podSpec.InitContainers, containersInjectedTo(configSpec), envSourceObject.GetName(), withEnvSource(toSecret(configSpec)))
+		}
 		return nil
 	}
 
 	for _, template := range component.ConfigTemplates {
-		if len(template.AsEnvFrom) == 0 || template.ConfigConstraintRef == "" {
+		if !InjectEnvEnabled(template) || template.ConfigConstraintRef == "" {
 			continue
 		}
 		cmName := core.GetComponentCfgName(cluster.Name, component.Name, template.Name)
@@ -63,7 +85,7 @@ func injectTemplateEnvFrom(cluster *appsv1alpha1.Cluster, component *component.S
 		if err != nil {
 			return err
 		}
-		envMap, err := fromConfigmapFiles(fromConfigSpec(template, cm), cm, cc.FormatterConfig)
+		envMap, err := fromConfigmapFiles(fromConfigSpec(template, cm), cm, cc.FileFormatConfig)
 		if err != nil {
 			return err
 		}
@@ -77,22 +99,39 @@ func injectTemplateEnvFrom(cluster *appsv1alpha1.Cluster, component *component.S
 	return nil
 }
 
-func getConfigConstraint(template appsv1alpha1.ComponentConfigSpec, cli client.Client, ctx context.Context) (*appsv1alpha1.ConfigConstraintSpec, error) {
+func updateSecretVolumes(volumes []corev1.Volume, configSpec appsv1.ComponentConfigSpec, secret client.Object, component *component.SynthesizedComponent) []corev1.Volume {
+	sets := configSetFromComponent(component.ConfigTemplates)
+	createFn := func(_ string) corev1.Volume {
+		return corev1.Volume{
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName:  secret.GetName(),
+					DefaultMode: intctrlutil.BuildVolumeMode(sets, configSpec.ComponentTemplateSpec),
+				},
+			},
+			Name: configSpec.VolumeName,
+		}
+	}
+	volumes, _ = intctrlutil.CreateOrUpdateVolume(volumes, configSpec.VolumeName, createFn, nil)
+	return volumes
+}
+
+func getConfigConstraint(template appsv1.ComponentConfigSpec, cli client.Client, ctx context.Context) (*appsv1beta1.ConfigConstraintSpec, error) {
 	ccKey := client.ObjectKey{
 		Namespace: "",
 		Name:      template.ConfigConstraintRef,
 	}
-	cc := &appsv1alpha1.ConfigConstraint{}
+	cc := &appsv1beta1.ConfigConstraint{}
 	if err := cli.Get(ctx, ccKey, cc); err != nil {
 		return nil, core.WrapError(err, "failed to get ConfigConstraint, key[%v]", ccKey)
 	}
-	if cc.Spec.FormatterConfig == nil {
+	if cc.Spec.FileFormatConfig == nil {
 		return nil, core.MakeError("ConfigConstraint[%v] is not a formatter", cc.Name)
 	}
 	return &cc.Spec, nil
 }
 
-func fromConfigmapFiles(keys []string, cm *corev1.ConfigMap, formatter *appsv1alpha1.FormatterConfig) (map[string]string, error) {
+func fromConfigmapFiles(keys []string, cm *corev1.ConfigMap, formatter *appsv1beta1.FileFormatConfig) (map[string]string, error) {
 	mergeMap := func(dst, src map[string]string) {
 		for key, val := range src {
 			dst[key] = val
@@ -120,33 +159,52 @@ func fetchConfigmap(localObjs []client.Object, cmName, namespace string, cli cli
 	if localObject != nil {
 		return localObject.(*corev1.ConfigMap), nil
 	}
-	if err := cli.Get(ctx, cmKey, cmObj); err != nil {
+	if err := cli.Get(ctx, cmKey, cmObj, inDataContext()); err != nil {
 		return nil, err
 	}
 	return cmObj, nil
 }
 
-func createEnvFromConfigmap(cluster *appsv1alpha1.Cluster, componentName string, template appsv1alpha1.ComponentConfigSpec, originKey client.ObjectKey, envMap map[string]string, ctx context.Context, cli client.Client) (*corev1.ConfigMap, error) {
+func createOrUpdateResourceFromConfigTemplate(cluster *appsv1.Cluster, component *component.SynthesizedComponent, template appsv1.ComponentConfigSpec, originKey client.ObjectKey, envMap map[string]string, ctx context.Context, cli client.Client, createOnly bool) (client.Object, error) {
 	cmKey := client.ObjectKey{
 		Name:      core.GenerateEnvFromName(originKey.Name),
 		Namespace: originKey.Namespace,
 	}
-	cm := &corev1.ConfigMap{}
-	err := cli.Get(ctx, cmKey, cm)
-	if err == nil {
-		return cm, nil
+
+	updateObjectMeta := func(obj client.Object) {
+		obj.SetLabels(constant.GetConfigurationLabels(component.ClusterName, component.Name, template.Name))
+		_ = intctrlutil.SetOwnerReference(cluster, obj)
 	}
-	if !apierrors.IsNotFound(err) {
-		return nil, err
+
+	if toSecret(template) {
+		return updateOrCreateEnvObject(ctx, cli, &corev1.Secret{}, cmKey, func(c *corev1.Secret) {
+			c.StringData = envMap
+			updateObjectMeta(c)
+		}, createOnly)
 	}
-	cm.Name = cmKey.Name
-	cm.Namespace = cmKey.Namespace
-	cm.Data = envMap
-	cm.Labels = constant.GetKBConfigMapWellKnownLabels(template.Name, cluster.Spec.ClusterDefRef, cluster.Name, componentName)
-	if err := intctrlutil.SetOwnerReference(cluster, cm); err != nil {
-		return nil, err
+	return updateOrCreateEnvObject(ctx, cli, &corev1.ConfigMap{}, cmKey, func(c *corev1.ConfigMap) {
+		c.Data = envMap
+		updateObjectMeta(c)
+	}, createOnly)
+}
+
+func updateOrCreateEnvObject[T generics.Object, PT generics.PObject[T]](ctx context.Context, cli client.Client, obj PT, objKey client.ObjectKey, updater func(PT), createOnly bool) (client.Object, error) {
+	err := cli.Get(ctx, objKey, obj, inDataContext())
+	switch {
+	case err != nil:
+		if !apierrors.IsNotFound(err) {
+			return nil, err
+		}
+		obj.SetName(objKey.Name)
+		obj.SetNamespace(objKey.Namespace)
+		updater(obj)
+		return obj, cli.Create(ctx, obj, inDataContext())
+	case err == nil && createOnly:
+		return obj, nil
+	default:
+		updater(obj)
+		return obj, cli.Update(ctx, obj, inDataContext())
 	}
-	return cm, cli.Create(ctx, cm)
 }
 
 func CheckEnvFrom(container *corev1.Container, cmName string) bool {
@@ -155,27 +213,24 @@ func CheckEnvFrom(container *corev1.Container, cmName string) bool {
 		if source.ConfigMapRef != nil && source.ConfigMapRef.Name == cmName {
 			return true
 		}
+		if source.SecretRef != nil && source.SecretRef.Name == cmName {
+			return true
+		}
 	}
 	return false
 }
 
-func injectEnvFrom(containers []corev1.Container, asEnvFrom []string, cmName string) {
-	sets := cfgutil.NewSet(asEnvFrom...)
+func injectEnvFrom(containers []corev1.Container, injectEnvTo []string, cmName string, fn func(string) corev1.EnvFromSource) {
+	sets := cfgutil.NewSet(injectEnvTo...)
 	for i := range containers {
 		container := &containers[i]
 		if sets.InArray(container.Name) && !CheckEnvFrom(container, cmName) {
-			container.EnvFrom = append(container.EnvFrom,
-				corev1.EnvFromSource{
-					ConfigMapRef: &corev1.ConfigMapEnvSource{
-						LocalObjectReference: corev1.LocalObjectReference{
-							Name: cmName,
-						}},
-				})
+			container.EnvFrom = append(container.EnvFrom, fn(cmName))
 		}
 	}
 }
 
-func fromFileContent(format *appsv1alpha1.FormatterConfig, configContext string) (map[string]string, error) {
+func fromFileContent(format *appsv1beta1.FileFormatConfig, configContext string) (map[string]string, error) {
 	keyValue, err := validate.LoadConfigObjectFromContent(format.Format, configContext)
 	if err != nil {
 		return nil, err
@@ -187,7 +242,7 @@ func fromFileContent(format *appsv1alpha1.FormatterConfig, configContext string)
 	return envMap, nil
 }
 
-func fromConfigSpec(configSpec appsv1alpha1.ComponentConfigSpec, cm *corev1.ConfigMap) []string {
+func fromConfigSpec(configSpec appsv1.ComponentConfigSpec, cm *corev1.ConfigMap) []string {
 	keys := configSpec.Keys
 	if len(keys) == 0 {
 		keys = cfgutil.ToSet(cm.Data).AsSlice()
@@ -195,34 +250,31 @@ func fromConfigSpec(configSpec appsv1alpha1.ComponentConfigSpec, cm *corev1.Conf
 	return keys
 }
 
-func SyncEnvConfigmap(configSpec appsv1alpha1.ComponentConfigSpec, cmObj *corev1.ConfigMap, cc *appsv1alpha1.ConfigConstraintSpec, cli client.Client, ctx context.Context) error {
-	if len(configSpec.AsEnvFrom) == 0 || cc == nil || cc.FormatterConfig == nil {
+func SyncEnvSourceObject(configSpec appsv1.ComponentConfigSpec, cmObj *corev1.ConfigMap, cc *appsv1beta1.ConfigConstraintSpec, cli client.Client, ctx context.Context, cluster *appsv1.Cluster, component *component.SynthesizedComponent) error {
+	if !InjectEnvEnabled(configSpec) || cc == nil || cc.FileFormatConfig == nil {
 		return nil
 	}
-	envMap, err := fromConfigmapFiles(fromConfigSpec(configSpec, cmObj), cmObj, cc.FormatterConfig)
+	envMap, err := fromConfigmapFiles(fromConfigSpec(configSpec, cmObj), cmObj, cc.FileFormatConfig)
 	if err != nil {
 		return err
 	}
-	if len(envMap) == 0 {
-		return nil
+	if len(envMap) != 0 {
+		_, err = createOrUpdateResourceFromConfigTemplate(cluster, component, configSpec, client.ObjectKeyFromObject(cmObj), envMap, ctx, cli, false)
 	}
-
-	return updateEnvFromConfigmap(client.ObjectKeyFromObject(cmObj), envMap, cli, ctx)
+	return err
 }
 
-func updateEnvFromConfigmap(origObj client.ObjectKey, envMap map[string]string, cli client.Client, ctx context.Context) error {
-	cmKey := client.ObjectKey{
-		Name:      core.GenerateEnvFromName(origObj.Name),
-		Namespace: origObj.Namespace,
+func InjectEnvEnabled(spec appsv1.ComponentConfigSpec) bool {
+	return len(spec.AsEnvFrom) > 0 || len(spec.InjectEnvTo) > 0
+}
+
+func toSecret(spec appsv1.ComponentConfigSpec) bool {
+	return spec.AsSecret != nil && *spec.AsSecret
+}
+
+func containersInjectedTo(spec appsv1.ComponentConfigSpec) []string {
+	if len(spec.InjectEnvTo) != 0 {
+		return spec.InjectEnvTo
 	}
-	cm := &corev1.ConfigMap{}
-	if err := cli.Get(ctx, cmKey, cm); err != nil {
-		return err
-	}
-	patch := client.MergeFrom(cm.DeepCopy())
-	cm.Data = envMap
-	if err := cli.Patch(ctx, cm, patch); err != nil {
-		return err
-	}
-	return nil
+	return spec.AsEnvFrom
 }

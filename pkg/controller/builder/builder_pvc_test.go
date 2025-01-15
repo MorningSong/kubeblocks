@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -33,7 +33,7 @@ var _ = Describe("pvc builder", func() {
 			name = "foo"
 			ns   = "default"
 		)
-		resources := corev1.ResourceRequirements{
+		resources := corev1.VolumeResourceRequirements{
 			Requests: map[corev1.ResourceName]resource.Quantity{
 				"CPU": resource.MustParse("500m"),
 			},
@@ -55,6 +55,23 @@ var _ = Describe("pvc builder", func() {
 			SetDataSource(dataSource).
 			GetObject()
 
+		Expect(pvc.Name).Should(Equal(name))
+		Expect(pvc.Namespace).Should(Equal(ns))
+		Expect(pvc.Spec.Resources).Should(Equal(resources))
+		Expect(pvc.Spec.AccessModes).Should(Equal(accessModes))
+		Expect(pvc.Spec.StorageClassName).ShouldNot(BeNil())
+		Expect(*pvc.Spec.StorageClassName).Should(Equal(sc))
+		Expect(pvc.Spec.DataSource).ShouldNot(BeNil())
+		Expect(*pvc.Spec.DataSource).Should(Equal(dataSource))
+
+		spec := corev1.PersistentVolumeClaimSpec{
+			Resources:        resources,
+			AccessModes:      accessModes,
+			StorageClassName: &sc,
+			DataSource:       &dataSource,
+		}
+
+		pvc = NewPVCBuilder(ns, name).SetSpec(spec).GetObject()
 		Expect(pvc.Name).Should(Equal(name))
 		Expect(pvc.Namespace).Should(Equal(ns))
 		Expect(pvc.Spec.Resources).Should(Equal(resources))

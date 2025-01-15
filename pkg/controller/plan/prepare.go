@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -23,23 +23,25 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
+	appsv1 "github.com/apecloud/kubeblocks/apis/apps/v1"
 	"github.com/apecloud/kubeblocks/pkg/controller/component"
 	"github.com/apecloud/kubeblocks/pkg/controller/configuration"
-	intctrlutil "github.com/apecloud/kubeblocks/pkg/controllerutil"
+	"github.com/apecloud/kubeblocks/pkg/controller/render"
 )
 
 // RenderConfigNScriptFiles generates volumes for PodTemplate, volumeMount for container, rendered configTemplate and scriptTemplate,
 // and generates configManager sidecar for the reconfigure operation.
-func RenderConfigNScriptFiles(resourceCtx *intctrlutil.ResourceCtx,
-	cluster *appsv1alpha1.Cluster,
-	component *component.SynthesizedComponent,
+func RenderConfigNScriptFiles(resourceCtx *render.ResourceCtx,
+	cluster *appsv1.Cluster,
+	component *appsv1.Component,
+	synthesizedComponent *component.SynthesizedComponent,
 	podSpec *corev1.PodSpec,
 	localObjs []client.Object) error {
 	return configuration.NewConfigReconcileTask(
 		resourceCtx,
 		cluster,
 		component,
+		synthesizedComponent,
 		podSpec,
 		localObjs).Reconcile()
 }

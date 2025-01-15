@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,8 +28,8 @@ type FakeWorkloadsV1alpha1 struct {
 	*testing.Fake
 }
 
-func (c *FakeWorkloadsV1alpha1) ReplicatedStateMachines(namespace string) v1alpha1.ReplicatedStateMachineInterface {
-	return &FakeReplicatedStateMachines{c, namespace}
+func (c *FakeWorkloadsV1alpha1) InstanceSets(namespace string) v1alpha1.InstanceSetInterface {
+	return &FakeInstanceSets{c, namespace}
 }
 
 // RESTClient returns a RESTClient that is used to communicate

@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -28,9 +28,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"text/template/parse"
 
-	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
+	appsv1beta1 "github.com/apecloud/kubeblocks/apis/apps/v1beta1"
 	"github.com/apecloud/kubeblocks/pkg/configuration/core"
 	cfgutil "github.com/apecloud/kubeblocks/pkg/configuration/util"
 	"github.com/apecloud/kubeblocks/pkg/gotemplate"
@@ -50,7 +51,7 @@ const (
 // for testing
 var newCommandChannel = NewCommandChannel
 
-func OnlineUpdateParamsHandle(tplScriptPath string, formatConfig *appsv1alpha1.FormatterConfig, dataType, dsn string) (DynamicUpdater, error) {
+func OnlineUpdateParamsHandle(tplScriptPath string, formatConfig *appsv1beta1.FileFormatConfig, dataType, dsn string) (DynamicUpdater, error) {
 	tplContent, err := os.ReadFile(tplScriptPath)
 	if err != nil {
 		return nil, err
@@ -63,6 +64,16 @@ func OnlineUpdateParamsHandle(tplScriptPath string, formatConfig *appsv1alpha1.F
 	}, nil
 }
 
+func renderDSN(dsn string) (string, error) {
+	engine := gotemplate.NewTplEngine(nil, nil, "render-dsn", nil, nil, gotemplate.WithCustomizedWithType(gotemplate.KBDSL))
+	renderedDSN, err := engine.Render(dsn)
+	if err != nil {
+		logger.Error(err, fmt.Sprintf("failed to render dsn:[%s]", dsn))
+		return dsn, err
+	}
+	return strings.TrimSpace(renderedDSN), nil
+}
+
 func checkTPLScript(tplName string, tplContent string) error {
 	tr := parse.New(tplName)
 	tr.Mode = parse.SkipFuncCheck
@@ -70,7 +81,7 @@ func checkTPLScript(tplName string, tplContent string) error {
 	return err
 }
 
-func wrapGoTemplateRun(ctx context.Context, tplScriptPath string, tplContent string, updatedParams map[string]string, formatConfig *appsv1alpha1.FormatterConfig, dataType string, dsn string) error {
+func wrapGoTemplateRun(ctx context.Context, tplScriptPath string, tplContent string, updatedParams map[string]string, formatConfig *appsv1beta1.FileFormatConfig, dataType string, dsn string) error {
 	var (
 		err            error
 		commandChannel DynamicParamUpdater
@@ -92,7 +103,7 @@ func wrapGoTemplateRun(ctx context.Context, tplScriptPath string, tplContent str
 	return err
 }
 
-func constructReloadBuiltinFuncs(ctx context.Context, cc DynamicParamUpdater, formatConfig *appsv1alpha1.FormatterConfig) *gotemplate.BuiltInObjectsFunc {
+func constructReloadBuiltinFuncs(ctx context.Context, cc DynamicParamUpdater, formatConfig *appsv1beta1.FileFormatConfig) *gotemplate.BuiltInObjectsFunc {
 	return &gotemplate.BuiltInObjectsFunc{
 		builtInExecFunctionName: func(command string, args ...string) (string, error) {
 			execCommand := exec.CommandContext(ctx, command, args...)
@@ -126,7 +137,7 @@ func constructReloadBuiltinFuncs(ctx context.Context, cc DynamicParamUpdater, fo
 	}
 }
 
-func createUpdatedParamsPatch(newVersion []string, oldVersion []string, formatCfg *appsv1alpha1.FormatterConfig) (map[string]string, error) {
+func createUpdatedParamsPatch(newVersion []string, oldVersion []string, formatCfg *appsv1beta1.FileFormatConfig) (map[string]string, error) {
 	patchOption := core.CfgOption{
 		Type:    core.CfgTplType,
 		CfgType: formatCfg.Format,
@@ -221,6 +232,13 @@ func createFileRegex(fileRegex string) (regexFilter, error) {
 func scanConfigFiles(dirs []string, filter regexFilter) ([]string, error) {
 	configs := make([]string, 0)
 	for _, dir := range dirs {
+		isDir, err := isDirectory(dir)
+		if err != nil {
+			return nil, err
+		}
+		if !isDir {
+			continue
+		}
 		files, err := os.ReadDir(dir)
 		if err != nil {
 			return nil, err
@@ -235,6 +253,14 @@ func scanConfigFiles(dirs []string, filter regexFilter) ([]string, error) {
 		}
 	}
 	return configs, nil
+}
+
+func isDirectory(path string) (bool, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return false, err
+	}
+	return fi.IsDir(), nil
 }
 
 func ScanConfigVolume(mountPoint string) ([]string, error) {
@@ -294,7 +320,7 @@ func NeedSharedProcessNamespace(configSpecs []ConfigSpecMeta) bool {
 		if configSpec.ConfigSpec.ConfigConstraintRef == "" {
 			continue
 		}
-		if configSpec.ReloadType == appsv1alpha1.UnixSignalType {
+		if configSpec.ReloadType == appsv1beta1.UnixSignalType {
 			return true
 		}
 	}

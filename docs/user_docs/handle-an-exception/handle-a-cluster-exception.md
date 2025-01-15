@@ -6,6 +6,9 @@ sidebar_position: 1
 sidebar_label: Handle an exception
 ---
 
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
 # Handle an exception
 
 When an exception occurs during your operation, you can perform the following steps to solve it.
@@ -14,9 +17,25 @@ When an exception occurs during your operation, you can perform the following st
 
 1. Check the cluster status.
 
+   <Tabs>
+
+   <TabItem value="kubectl" label="kubectl" default>
+
     ```bash
-    kbcli cluster list mycluster
+    kubectl describe cluster mycluster
     ```
+
+   </TabItem>
+
+   <TabItem value="kbcli" label="kbcli">
+
+   ```bash
+   kbcli cluster list mycluster
+   ```
+
+   </TabItem>
+
+   </Tabs>
 
 2. Handle the exception according to the status information.
 

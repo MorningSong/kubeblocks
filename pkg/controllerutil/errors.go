@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -42,6 +42,8 @@ type ErrorType string
 const (
 	// ErrorWaitCacheRefresh waits for synchronization of the corresponding object cache in client-go from ApiServer.
 	ErrorWaitCacheRefresh ErrorType = "WaitCacheRefresh"
+	ErrorIgnoreCancel     ErrorType = "IgnoreCancel"
+
 	// ErrorTypeNotFound not found any resource.
 	ErrorTypeNotFound ErrorType = "NotFound"
 
@@ -57,6 +59,9 @@ const (
 	// ErrorType for preflight
 	ErrorTypePreflightCommon = "PreflightCommon"
 	ErrorTypeSkipPreflight   = "SkipPreflight"
+
+	// ErrorTypeExpectedInProcess is used to indicate that the operation is expected to be in process.
+	ErrorTypeExpectedInProcess ErrorType = "ExpectedInProcess"
 )
 
 var ErrFailedToAddFinalizer = errors.New("failed to add finalizer")

@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -22,12 +22,13 @@ package core
 import (
 	"encoding/json"
 	"reflect"
+	"slices"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
+	appsv1beta1 "github.com/apecloud/kubeblocks/apis/apps/v1beta1"
 	"github.com/apecloud/kubeblocks/pkg/configuration/util"
 	"github.com/apecloud/kubeblocks/pkg/constant"
 )
@@ -77,7 +78,7 @@ func trimNestedField(updatedParams any, trimField string) (any, error) {
 }
 
 // ValidateConfigPatch Verifies if the changed parameters have been removed
-func ValidateConfigPatch(patch *ConfigPatchInfo, formatCfg *appsv1alpha1.FormatterConfig) error {
+func ValidateConfigPatch(patch *ConfigPatchInfo, formatCfg *appsv1beta1.FileFormatConfig) error {
 	if !patch.IsModify || len(patch.UpdateConfig) == 0 {
 		return nil
 	}
@@ -94,12 +95,12 @@ func ValidateConfigPatch(patch *ConfigPatchInfo, formatCfg *appsv1alpha1.Formatt
 }
 
 // IsUpdateDynamicParameters checks if the changed parameters require a restart
-func IsUpdateDynamicParameters(cc *appsv1alpha1.ConfigConstraintSpec, cfg *ConfigPatchInfo) (bool, error) {
+func IsUpdateDynamicParameters(cc *appsv1beta1.ConfigConstraintSpec, cfg *ConfigPatchInfo) (bool, error) {
 	if len(cfg.DeleteConfig) > 0 || len(cfg.AddConfig) > 0 {
 		return false, nil
 	}
 
-	updatedParams, err := getUpdateParameterList(cfg, NestedPrefixField(cc.FormatterConfig))
+	updatedParams, err := getUpdateParameterList(cfg, NestedPrefixField(cc.FileFormatConfig))
 	if err != nil {
 		return false, err
 	}
@@ -131,6 +132,17 @@ func IsUpdateDynamicParameters(cc *appsv1alpha1.ConfigConstraintSpec, cfg *Confi
 	// if the updated parameter is not in list of DynamicParameter,
 	// it is StaticParameter by default, and restart is the default behavior.
 	return false, nil
+}
+
+// IsDynamicParameter checks if the parameter supports hot update
+func IsDynamicParameter(paramName string, cc *appsv1beta1.ConfigConstraintSpec) bool {
+	if len(cc.DynamicParameters) != 0 {
+		return slices.Contains(cc.DynamicParameters, paramName)
+	}
+	if len(cc.StaticParameters) != 0 {
+		return !slices.Contains(cc.StaticParameters, paramName)
+	}
+	return false
 }
 
 // IsParametersUpdateFromManager checks if the parameters are updated from manager

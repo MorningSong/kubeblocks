@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
+	appsv1beta1 "github.com/apecloud/kubeblocks/apis/apps/v1beta1"
 	cfgcore "github.com/apecloud/kubeblocks/pkg/configuration/core"
 	"github.com/apecloud/kubeblocks/pkg/constant"
 	intctrlutil "github.com/apecloud/kubeblocks/pkg/generics"
@@ -37,12 +38,6 @@ import (
 )
 
 var _ = Describe("ConfigConstraint Controller", func() {
-	const clusterDefName = "test-clusterdef"
-	const clusterVersionName = "test-clusterversion"
-	const statefulCompDefName = "replicasets"
-	const configSpecName = "mysql-config-tpl"
-	const configVolumeName = "mysql-config"
-
 	cleanEnv := func() {
 		// must wait till resources deleted and no longer existed before the testcases start,
 		// otherwise if later it needs to create some new resource objects with the same name,
@@ -50,7 +45,7 @@ var _ = Describe("ConfigConstraint Controller", func() {
 		// create the new objects.
 		By("clean resources")
 
-		// delete cluster(and all dependent sub-resources), clusterversion and clusterdef
+		// delete cluster(and all dependent sub-resources), cluster definition
 		testapps.ClearClusterResources(&testCtx)
 
 		// delete rest mocked objects
@@ -69,36 +64,29 @@ var _ = Describe("ConfigConstraint Controller", func() {
 	Context("Create config constraint with cue validate", func() {
 		It("Should ready", func() {
 			By("creating a configmap and a config constraint")
-
 			configmap := testapps.CreateCustomizedObj(&testCtx,
 				"resources/mysql-config-template.yaml", &corev1.ConfigMap{},
 				testCtx.UseDefaultNamespace())
-
 			constraint := testapps.CreateCustomizedObj(&testCtx,
 				"resources/mysql-config-constraint.yaml",
-				&appsv1alpha1.ConfigConstraint{})
+				&appsv1beta1.ConfigConstraint{})
 			constraintKey := client.ObjectKeyFromObject(constraint)
 
-			By("Create a clusterDefinition obj")
-			clusterDefObj := testapps.NewClusterDefFactory(clusterDefName).
-				AddComponentDef(testapps.StatefulMySQLComponent, statefulCompDefName).
+			By("Create a componentDefinition obj")
+			compDefObj := testapps.NewComponentDefinitionFactory(compDefName).
+				WithRandomName().
+				SetDefaultSpec().
 				AddConfigTemplate(configSpecName, configmap.Name, constraint.Name, testCtx.DefaultNamespace, configVolumeName).
 				AddLabels(cfgcore.GenerateTPLUniqLabelKeyWithConfig(configSpecName), configmap.Name,
 					cfgcore.GenerateConstraintsUniqLabelKeyWithConfig(constraint.Name), constraint.Name).
-				Create(&testCtx).GetObject()
-
-			By("Create a clusterVersion obj")
-			clusterVersionObj := testapps.NewClusterVersionFactory(clusterVersionName, clusterDefObj.GetName()).
-				AddComponentVersion(statefulCompDefName).
-				AddLabels(cfgcore.GenerateTPLUniqLabelKeyWithConfig(configSpecName), configmap.Name,
-					cfgcore.GenerateConstraintsUniqLabelKeyWithConfig(constraint.Name), constraint.Name).
-				Create(&testCtx).GetObject()
+				Create(&testCtx).
+				GetObject()
 
 			By("check ConfigConstraint(template) status and finalizer")
 			Eventually(testapps.CheckObj(&testCtx, constraintKey,
-				func(g Gomega, tpl *appsv1alpha1.ConfigConstraint) {
+				func(g Gomega, tpl *appsv1beta1.ConfigConstraint) {
 					g.Expect(tpl.Status.Phase).To(BeEquivalentTo(appsv1alpha1.AvailablePhase))
-					g.Expect(tpl.Finalizers).To(ContainElement(constant.ConfigurationTemplateFinalizerName))
+					g.Expect(tpl.Finalizers).To(ContainElement(constant.ConfigFinalizerName))
 				})).Should(Succeed())
 
 			By("By delete ConfigConstraint")
@@ -106,20 +94,19 @@ var _ = Describe("ConfigConstraint Controller", func() {
 
 			By("check ConfigConstraint should not be deleted")
 			log.Log.Info("expect that ConfigConstraint is not deleted.")
-			Consistently(testapps.CheckObjExists(&testCtx, constraintKey, &appsv1alpha1.ConfigConstraint{}, true)).Should(Succeed())
+			Consistently(testapps.CheckObjExists(&testCtx, constraintKey, &appsv1beta1.ConfigConstraint{}, true)).Should(Succeed())
 
 			By("check ConfigConstraint status should be deleting")
 			Eventually(testapps.CheckObj(&testCtx, constraintKey,
-				func(g Gomega, tpl *appsv1alpha1.ConfigConstraint) {
-					g.Expect(tpl.Status.Phase).To(BeEquivalentTo(appsv1alpha1.CCDeletingPhase))
+				func(g Gomega, tpl *appsv1beta1.ConfigConstraint) {
+					g.Expect(tpl.Status.Phase).To(BeEquivalentTo(appsv1beta1.CCDeletingPhase))
 				})).Should(Succeed())
 
-			By("By delete referencing clusterdefinition and clusterversion")
-			Expect(k8sClient.Delete(testCtx.Ctx, clusterVersionObj)).Should(Succeed())
-			Expect(k8sClient.Delete(testCtx.Ctx, clusterDefObj)).Should(Succeed())
+			By("By delete referencing componentdefinition")
+			Expect(k8sClient.Delete(testCtx.Ctx, compDefObj)).Should(Succeed())
 
 			By("check ConfigConstraint should be deleted")
-			Eventually(testapps.CheckObjExists(&testCtx, constraintKey, &appsv1alpha1.ConfigConstraint{}, false), time.Second*60, time.Second*1).Should(Succeed())
+			Eventually(testapps.CheckObjExists(&testCtx, constraintKey, &appsv1beta1.ConfigConstraint{}, false), time.Second*60, time.Second*1).Should(Succeed())
 		})
 	})
 
@@ -131,11 +118,11 @@ var _ = Describe("ConfigConstraint Controller", func() {
 				testCtx.UseDefaultNamespace())
 
 			constraint := testapps.CreateCustomizedObj(&testCtx, "resources/mysql-config-constraint-not-validate.yaml",
-				&appsv1alpha1.ConfigConstraint{})
+				&appsv1beta1.ConfigConstraint{})
 
 			By("check config constraint status")
 			Eventually(testapps.CheckObj(&testCtx, client.ObjectKeyFromObject(constraint),
-				func(g Gomega, tpl *appsv1alpha1.ConfigConstraint) {
+				func(g Gomega, tpl *appsv1beta1.ConfigConstraint) {
 					g.Expect(tpl.Status.Phase).Should(BeEquivalentTo(appsv1alpha1.AvailablePhase))
 				})).Should(Succeed())
 		})

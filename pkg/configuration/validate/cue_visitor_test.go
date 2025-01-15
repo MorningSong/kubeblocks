@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -279,6 +279,15 @@ func TestTransNumberOrBoolType(t *testing.T) {
 			t:        ClassicTimeDurationType,
 			objs:     []string{"1", "100", "1s", "1min", "20m", "5d", "10000ms", "20MIN"},
 			expected: []interface{}{1, 100, 1000, 60 * 1000, 20 * 60 * 1000, 5 * Day, 10000, 20 * 60 * 1000},
+		},
+		wantErr: false,
+	}, {
+		name: "testClassResource",
+		args: args{
+			t:        ClassicTimeDurationType,
+			objs:     []string{"1", "1000", "1s", "1min", "20m", "5d", "10000ms", "20MIN"},
+			expected: []interface{}{1, 1000, 1, 60, 20 * 60, int64(5 * Day / 1000), 10, 20 * 60},
+			expand:   "1s",
 		},
 		wantErr: false,
 	}, {

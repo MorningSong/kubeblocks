@@ -2,8 +2,8 @@
 name: Feature request
 about: Suggest a user related feature for this project
 title: "[Features]"
-labels: area/user-interaction, documentation, kind/feature
-assignees: nayutah
+labels: kind/feature
+assignees: shanshanying
 
 ---
 

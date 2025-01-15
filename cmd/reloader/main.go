@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -33,10 +33,6 @@ import (
 	viper "github.com/apecloud/kubeblocks/pkg/viperx"
 )
 
-// Reload configuration
-// TODO(zt) support unix signal
-// TODO(zt) support shell
-
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	sig := make(chan os.Signal, 1)
@@ -48,7 +44,7 @@ func main() {
 
 	viper.AutomaticEnv()
 	cmd := app.NewConfigManagerCommand(ctx, filepath.Base(os.Args[0]))
-	if err := cmd.Execute(); err != nil && errors.Cause(err) != context.Canceled {
+	if err := cmd.Execute(); err != nil && errors.Is(errors.Cause(err), context.Canceled) {
 		fmt.Println(err)
 		os.Exit(-1)
 	}

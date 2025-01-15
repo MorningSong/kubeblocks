@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -123,10 +123,6 @@ func ActionStatusPtr() *Action {
 	return actionPtr(STATUS)
 }
 
-func ActionNoopPtr() *Action {
-	return actionPtr(NOOP)
-}
-
 func NewRequeueError(after time.Duration, reason string) error {
 	return &realRequeueError{
 		reason:       reason,
@@ -165,13 +161,37 @@ func IsObjectStatusUpdating(object client.Object) bool {
 	return !IsObjectDeleting(object) && !IsObjectUpdating(object)
 }
 
-// ReadCacheSnapshot reads all objects owned by our cluster
+func IsReconciliationPaused(object client.Object) bool {
+	value := reflect.ValueOf(object)
+	if value.Kind() == reflect.Ptr {
+		value = value.Elem()
+	}
+	if value.Kind() != reflect.Struct {
+		return false
+	}
+	spec := value.FieldByName("Spec")
+	if !spec.IsValid() {
+		return false
+	}
+	paused := spec.FieldByName("Paused")
+	if !paused.IsValid() {
+		return false
+	}
+	if paused.Kind() == reflect.Ptr {
+		paused = paused.Elem()
+	}
+	if !paused.Type().AssignableTo(reflect.TypeOf(true)) {
+		return false
+	}
+	return paused.Interface().(bool)
+}
+
+// ReadCacheSnapshot reads all objects owned by root object.
 func ReadCacheSnapshot(transCtx graph.TransformContext, root client.Object, ml client.MatchingLabels, kinds ...client.ObjectList) (ObjectSnapshot, error) {
-	// list what kinds of object cluster owns
 	snapshot := make(ObjectSnapshot)
-	inNS := client.InNamespace(root.GetNamespace())
+	inNs := client.InNamespace(root.GetNamespace())
 	for _, list := range kinds {
-		if err := transCtx.GetClient().List(transCtx.GetContext(), list, inNS, ml); err != nil {
+		if err := transCtx.GetClient().List(transCtx.GetContext(), list, inNs, ml); err != nil {
 			return nil, err
 		}
 		// reflect get list.Items
@@ -187,7 +207,6 @@ func ReadCacheSnapshot(transCtx graph.TransformContext, root client.Object, ml c
 			snapshot[*name] = object
 		}
 	}
-
 	return snapshot, nil
 }
 

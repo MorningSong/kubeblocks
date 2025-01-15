@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -20,12 +20,14 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 package configuration
 
 import (
+	appsv1 "github.com/apecloud/kubeblocks/apis/apps/v1"
 	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
+	appsv1beta1 "github.com/apecloud/kubeblocks/apis/apps/v1beta1"
 	"github.com/apecloud/kubeblocks/pkg/configuration/core"
 	intctrlutil "github.com/apecloud/kubeblocks/pkg/controllerutil"
 )
 
-func DoMerge(baseData map[string]string, patch map[string]appsv1alpha1.ConfigParams, cc *appsv1alpha1.ConfigConstraint, configSpec appsv1alpha1.ComponentConfigSpec) (map[string]string, error) {
+func DoMerge(baseData map[string]string, patch map[string]appsv1alpha1.ConfigParams, cc *appsv1beta1.ConfigConstraint, configSpec appsv1.ComponentConfigSpec) (map[string]string, error) {
 	var (
 		updatedFiles  = make(map[string]string, len(patch))
 		updatedParams = make([]core.ParamPairs, 0, len(patch))
@@ -48,8 +50,8 @@ func DoMerge(baseData map[string]string, patch map[string]appsv1alpha1.ConfigPar
 func mergeUpdatedParams(base map[string]string,
 	updatedFiles map[string]string,
 	updatedParams []core.ParamPairs,
-	cc *appsv1alpha1.ConfigConstraint,
-	tpl appsv1alpha1.ComponentConfigSpec) (map[string]string, error) {
+	cc *appsv1beta1.ConfigConstraint,
+	tpl appsv1.ComponentConfigSpec) (map[string]string, error) {
 	updatedConfig := base
 
 	// merge updated files into configmap

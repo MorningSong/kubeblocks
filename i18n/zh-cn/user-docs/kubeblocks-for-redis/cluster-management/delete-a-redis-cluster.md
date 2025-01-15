@@ -19,35 +19,34 @@ import TabItem from '@theme/TabItem';
 
 :::
 
-| **terminationPolicy**  | **删除操作**                    |
-|:--                     | :--                                       |
-| `DoNotTerminate`       | `DoNotTerminate` 禁止删除操作。 |
-| `Halt`                 | `Halt` 删除工作负载资源（如 statefulset、deployment 等），但保留 PVC。 |
-| `Delete`               | `Delete` 删除工作负载资源和 PVC，但保留备份。 |
-| `WipeOut`              | `WipeOut` 删除工作负载资源、PVC 和所有相关资源（包括备份）。|
+| **终止策略** | **删除操作**                                                                     |
+|:----------------------|:-------------------------------------------------------------------------------------------|
+| `DoNotTerminate`      | `DoNotTerminate` 禁止删除操作。                                                  |
+| `Delete`              | `Delete` 删除 Pod、服务、PVC 等集群资源，删除所有持久数据。                              |
+| `WipeOut`             | `WipeOut`  删除所有集群资源，包括外部存储中的卷快照和备份。使用该策略将会删除全部数据，特别是在非生产环境，该策略将会带来不可逆的数据丢失。请谨慎使用。   |
 
 执行以下命令查看终止策略。
 
 <Tabs>
 
-<TabItem value="kbcli" label="kbcli" default>
+<TabItem value="kubectl" label="kubectl" default>
 
 ```bash
-kbcli cluster list redis-cluster
+kubectl -n demo get cluster mycluster
 >
-NAME   	        NAMESPACE	CLUSTER-DEFINITION	VERSION        	TERMINATION-POLICY	STATUS 	     CREATED-TIME
-redis-cluster	default  	redis    	        redis-7.0.6	    Delete            	Running	     Apr 10,2023 20:27 UTC+0800
+NAME        CLUSTER-DEFINITION   VERSION       TERMINATION-POLICY   STATUS    AGE
+mycluster   redis                              Delete               Running   10m
 ```
 
 </TabItem>
 
-<TabItem value="kubectl" label="kubectl">
+<TabItem value="kbcli" label="kbcli">
 
 ```bash
-kubectl -n demo get cluster redis
+kbcli cluster list mycluster -n demo
 >
-NAME    CLUSTER-DEFINITION   VERSION       TERMINATION-POLICY   STATUS    AGE
-redis   redis                redis-7.0.6   Delete               Running   10m
+NAME        NAMESPACE   CLUSTER-DEFINITION   VERSION   TERMINATION-POLICY   STATUS     CREATED-TIME
+mycluster   demo        redis                          Delete               Running    Sep 29,2024 09:46 UTC+0800
 ```
 
 </TabItem>
@@ -60,22 +59,26 @@ redis   redis                redis-7.0.6   Delete               Running   10m
 
 <Tabs>
 
-<TabItem value="kbcli" label="kbcli" default>
+<TabItem value="kubectl" label="kubectl" default>
 
 ```bash
-kbcli cluster delete redis-cluster
+kubectl delete cluster mycluster -n demo
 ```
-
-</TabItem>
-
-<TabItem value="kubectl" label="kubectl">
 
 如果想删除集群和所有相关资源，可以将终止策略修改为 `WipeOut`，然后再删除该集群。
 
 ```bash
-kubectl patch -n demo cluster redis -p '{"spec":{"terminationPolicy":"WipeOut"}}' --type="merge"
+kubectl patch -n demo cluster mycluster -p '{"spec":{"terminationPolicy":"WipeOut"}}' --type="merge"
 
-kubectl delete -n demo cluster redis
+kubectl delete -n demo cluster mycluster
+```
+
+</TabItem>
+
+<TabItem value="kbcli" label="kbcli">
+
+```bash
+kbcli cluster delete mycluster -n demo
 ```
 
 </TabItem>

@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -65,6 +65,8 @@ func init() {
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;delete;deletecollection
 // +kubebuilder:rbac:groups=core,resources=pods/log,verbs=get;list
 
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch
+
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 //
@@ -77,6 +79,8 @@ func (r *AddonReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		Log:      log.FromContext(ctx).WithValues("addon", req.NamespacedName),
 		Recorder: r.Recorder,
 	}
+
+	// TODO (good-first-issue) rewrite it using the new kubebuilderx framework
 
 	buildStageCtx := func(next ...ctrlerihandler.Handler) stageCtx {
 		return stageCtx{
@@ -97,6 +101,10 @@ func (r *AddonReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 
 	genIDProceedStageBuilder := func(next ...ctrlerihandler.Handler) ctrlerihandler.Handler {
 		return ctrlerihandler.NewTypeHandler(&genIDProceedCheckStage{stageCtx: buildStageCtx(next...)})
+	}
+
+	metadataCheckStageBuilder := func(next ...ctrlerihandler.Handler) ctrlerihandler.Handler {
+		return ctrlerihandler.NewTypeHandler(&metadataCheckStage{stageCtx: buildStageCtx(next...)})
 	}
 
 	installableCheckStageBuilder := func(next ...ctrlerihandler.Handler) ctrlerihandler.Handler {
@@ -122,6 +130,7 @@ func (r *AddonReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	handlers := ctrlerihandler.Chain(
 		fetchNDeletionCheckStageBuilder,
 		genIDProceedStageBuilder,
+		metadataCheckStageBuilder,
 		installableCheckStageBuilder,
 		autoInstallCheckStageBuilder,
 		enabledAutoValuesStageBuilder,
@@ -144,7 +153,7 @@ func (r *AddonReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *AddonReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	return intctrlutil.NewControllerManagedBy(mgr).
 		For(&extensionsv1alpha1.Addon{}).
 		Watches(&batchv1.Job{}, handler.EnqueueRequestsFromMapFunc(r.findAddonJobs)).
 		WithOptions(controller.Options{

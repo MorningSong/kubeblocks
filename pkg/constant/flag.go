@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -21,4 +21,22 @@ package constant
 
 const (
 	EnableRBACManager = "EnableRBACManager"
+
+	ManagedNamespacesFlag = "managed-namespaces"
+)
+
+const (
+	// HostNetworkAnnotationKey defines the feature gate to enable the host-network for specified components or shardings.
+	HostNetworkAnnotationKey = "kubeblocks.io/host-network"
+
+	// ShardPodAntiAffinityAnnotationKey defines the feature gate to set the pod anti-affinity of a shard for specified shardings.
+	ShardPodAntiAffinityAnnotationKey = "apps.kubeblocks.io/shard-pod-anti-affinity"
+
+	// FeatureReconciliationInCompactModeAnnotationKey indicates that the controller should run in compact mode,
+	// means to try the best to cutoff useless objects.
+	FeatureReconciliationInCompactModeAnnotationKey = "kubeblocks.io/compact-mode"
+
+	// FeatureGateInPlacePodVerticalScaling specifies to enable in-place pod vertical scaling
+	// NOTE: This feature depends on the InPlacePodVerticalScaling feature of the K8s cluster in which the KubeBlocks runs.
+	FeatureGateInPlacePodVerticalScaling = "IN_PLACE_POD_VERTICAL_SCALING"
 )

@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -22,6 +22,7 @@ package configuration
 import (
 	"context"
 	"fmt"
+	"math"
 	"strconv"
 	"time"
 
@@ -31,11 +32,17 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	appsv1 "github.com/apecloud/kubeblocks/apis/apps/v1"
 	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
+	"github.com/apecloud/kubeblocks/pkg/constant"
 	"github.com/apecloud/kubeblocks/pkg/controller/component"
+	"github.com/apecloud/kubeblocks/pkg/controller/multicluster"
+	"github.com/apecloud/kubeblocks/pkg/controller/render"
 	intctrlutil "github.com/apecloud/kubeblocks/pkg/controllerutil"
+	viper "github.com/apecloud/kubeblocks/pkg/viperx"
 )
 
 // ConfigurationReconciler reconciles a Configuration object
@@ -68,19 +75,19 @@ func (r *ConfigurationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		Recorder: r.Recorder,
 	}
 
-	configuration := &appsv1alpha1.Configuration{}
-	if err := r.Client.Get(reqCtx.Ctx, reqCtx.Req.NamespacedName, configuration); err != nil {
+	config := &appsv1alpha1.Configuration{}
+	if err := r.Client.Get(reqCtx.Ctx, reqCtx.Req.NamespacedName, config); err != nil {
 		return intctrlutil.CheckedRequeueWithError(err, reqCtx.Log, "cannot find configuration")
 	}
 
-	if !configuration.GetDeletionTimestamp().IsZero() {
-		reqCtx.Log.Info("configuration is deleting, skip reconcile")
-		return intctrlutil.Reconciled()
+	res, err := intctrlutil.HandleCRDeletion(reqCtx, r, config, constant.ConfigFinalizerName, nil)
+	if res != nil {
+		return *res, err
 	}
 
-	tasks := make([]Task, 0, len(configuration.Spec.ConfigItemDetails))
-	for _, item := range configuration.Spec.ConfigItemDetails {
-		if status := fromItemStatus(reqCtx, &configuration.Status, item); status != nil {
+	tasks := make([]Task, 0, len(config.Spec.ConfigItemDetails))
+	for _, item := range config.Spec.ConfigItemDetails {
+		if status := fromItemStatus(reqCtx, &config.Status, item); status != nil {
 			tasks = append(tasks, NewTask(item, status))
 		}
 	}
@@ -89,29 +96,31 @@ func (r *ConfigurationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	fetcherTask := &Task{}
-	err := fetcherTask.Init(&intctrlutil.ResourceCtx{
+	err = fetcherTask.Init(&render.ResourceCtx{
 		Context:       ctx,
 		Client:        r.Client,
-		Namespace:     configuration.Namespace,
-		ClusterName:   configuration.Spec.ClusterRef,
-		ComponentName: configuration.Spec.ComponentName,
+		Namespace:     config.Namespace,
+		ClusterName:   config.Spec.ClusterRef,
+		ComponentName: config.Spec.ComponentName,
 	}, fetcherTask).Cluster().
-		ClusterDef().
-		ClusterVer().
-		ClusterComponent().
+		ComponentAndComponentDef().
+		ComponentSpec().
 		Complete()
 	if err != nil {
 		return intctrlutil.CheckedRequeueWithError(err, reqCtx.Log, "failed to get related object.")
 	}
 
-	if fetcherTask.ClusterComObj == nil {
-		return r.failWithInvalidComponent(configuration, reqCtx)
+	if !fetcherTask.ClusterObj.GetDeletionTimestamp().IsZero() {
+		reqCtx.Log.Info("cluster is deleting, skip reconcile")
+		return intctrlutil.Reconciled()
 	}
-
-	if err := r.runTasks(TaskContext{configuration, reqCtx, fetcherTask}, tasks); err != nil {
+	if fetcherTask.ClusterComObj == nil || fetcherTask.ComponentObj == nil {
+		return r.failWithInvalidComponent(config, reqCtx)
+	}
+	if err := r.runTasks(TaskContext{config, ctx, fetcherTask}, tasks); err != nil {
 		return intctrlutil.CheckedRequeueWithError(err, reqCtx.Log, "failed to run configuration reconcile task.")
 	}
-	if !isAllReady(configuration) {
+	if !isAllReady(config) {
 		return intctrlutil.RequeueAfter(reconcileInterval, reqCtx.Log, "")
 	}
 	return intctrlutil.Reconciled()
@@ -119,7 +128,7 @@ func (r *ConfigurationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 func (r *ConfigurationReconciler) failWithInvalidComponent(configuration *appsv1alpha1.Configuration, reqCtx intctrlutil.RequestCtx) (ctrl.Result, error) {
 	msg := fmt.Sprintf("not found cluster component or cluster definition component: [%s]", configuration.Spec.ComponentName)
-	reqCtx.Log.Error(fmt.Errorf(msg), "")
+	reqCtx.Log.Error(fmt.Errorf("%s", msg), "")
 	patch := client.MergeFrom(configuration.DeepCopy())
 	configuration.Status.Message = msg
 	if err := r.Client.Status().Patch(reqCtx.Ctx, configuration, patch); err != nil {
@@ -142,12 +151,15 @@ func (r *ConfigurationReconciler) runTasks(taskCtx TaskContext, tasks []Task) (e
 	var (
 		errs            []error
 		synthesizedComp *component.SynthesizedComponent
-
-		ctx           = taskCtx.reqCtx.Ctx
-		configuration = taskCtx.configuration
+		configuration   = taskCtx.configuration
 	)
 
-	synthesizedComp, err = component.BuildSynthesizedComponentWrapper(taskCtx.reqCtx, r.Client, taskCtx.fetcher.ClusterObj, taskCtx.fetcher.ClusterComObj)
+	// build synthesized component for the component
+	synthesizedComp, err = component.BuildSynthesizedComponent(taskCtx.ctx, r.Client,
+		taskCtx.fetcher.ComponentDefObj, taskCtx.fetcher.ComponentObj, taskCtx.fetcher.ClusterObj)
+	if err == nil {
+		err = buildTemplateVars(taskCtx.ctx, r.Client, taskCtx.fetcher.ComponentDefObj, synthesizedComp)
+	}
 	if err != nil {
 		return err
 	}
@@ -166,7 +178,7 @@ func (r *ConfigurationReconciler) runTasks(taskCtx TaskContext, tasks []Task) (e
 	if len(errs) > 0 {
 		configuration.Status.Message = utilerrors.NewAggregate(errs).Error()
 	}
-	if err := r.Client.Status().Patch(ctx, configuration, patch); err != nil {
+	if err := r.Client.Status().Patch(taskCtx.ctx, configuration, patch); err != nil {
 		errs = append(errs, err)
 	}
 	if len(errs) == 0 {
@@ -176,11 +188,19 @@ func (r *ConfigurationReconciler) runTasks(taskCtx TaskContext, tasks []Task) (e
 }
 
 // SetupWithManager sets up the controller with the Manager.
-func (r *ConfigurationReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+func (r *ConfigurationReconciler) SetupWithManager(mgr ctrl.Manager, multiClusterMgr multicluster.Manager) error {
+	b := intctrlutil.NewControllerManagedBy(mgr).
 		For(&appsv1alpha1.Configuration{}).
-		Owns(&corev1.ConfigMap{}).
-		Complete(r)
+		WithOptions(controller.Options{
+			MaxConcurrentReconciles: int(math.Ceil(viper.GetFloat64(constant.CfgKBReconcileWorkers) / 2)),
+		}).
+		Owns(&corev1.ConfigMap{})
+
+	if multiClusterMgr != nil {
+		multiClusterMgr.Own(b, &corev1.ConfigMap{}, &appsv1alpha1.Configuration{})
+	}
+
+	return b.Complete(r)
 }
 
 func fromItemStatus(ctx intctrlutil.RequestCtx, status *appsv1alpha1.ConfigurationStatus, item appsv1alpha1.ConfigurationItemDetail) *appsv1alpha1.ConfigurationItemDetailStatus {
@@ -208,4 +228,16 @@ func isReconcileStatus(phase appsv1alpha1.ConfigurationPhase) bool {
 
 func isFinishStatus(phase appsv1alpha1.ConfigurationPhase) bool {
 	return phase == appsv1alpha1.CFinishedPhase || phase == appsv1alpha1.CFailedAndPausePhase
+}
+
+func buildTemplateVars(ctx context.Context, cli client.Reader,
+	compDef *appsv1.ComponentDefinition, synthesizedComp *component.SynthesizedComponent) error {
+	if compDef != nil && len(compDef.Spec.Vars) > 0 {
+		templateVars, _, err := component.ResolveTemplateNEnvVars(ctx, cli, synthesizedComp, compDef.Spec.Vars)
+		if err != nil {
+			return err
+		}
+		synthesizedComp.TemplateVars = templateVars
+	}
+	return nil
 }

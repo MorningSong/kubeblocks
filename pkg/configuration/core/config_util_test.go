@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -29,7 +29,8 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
+	appsv1 "github.com/apecloud/kubeblocks/apis/apps/v1"
+	appsv1beta1 "github.com/apecloud/kubeblocks/apis/apps/v1beta1"
 	cfgutil "github.com/apecloud/kubeblocks/pkg/configuration/util"
 	testutil "github.com/apecloud/kubeblocks/pkg/testutil/k8s"
 )
@@ -50,10 +51,10 @@ var _ = Describe("config_util", func() {
 
 	Context("common funcs test", func() {
 		It("GetReloadOptions Should success without error", func() {
-			mockTpl := v1alpha1.ConfigConstraint{
-				Spec: v1alpha1.ConfigConstraintSpec{
-					ReloadOptions: &v1alpha1.ReloadOptions{
-						UnixSignalTrigger: &v1alpha1.UnixSignalTrigger{
+			mockTpl := appsv1beta1.ConfigConstraint{
+				Spec: appsv1beta1.ConfigConstraintSpec{
+					ReloadAction: &appsv1beta1.ReloadAction{
+						UnixSignalTrigger: &appsv1beta1.UnixSignalTrigger{
 							Signal:      "HUB",
 							ProcessName: "for_test",
 						},
@@ -62,8 +63,8 @@ var _ = Describe("config_util", func() {
 			}
 			tests := []struct {
 				name    string
-				tpls    []v1alpha1.ComponentConfigSpec
-				want    *v1alpha1.ReloadOptions
+				tpls    []appsv1.ComponentConfigSpec
+				want    *appsv1beta1.ReloadAction
 				wantErr bool
 			}{{
 				// empty config templates
@@ -74,18 +75,18 @@ var _ = Describe("config_util", func() {
 			}, {
 				// empty config templates
 				name:    "test",
-				tpls:    []v1alpha1.ComponentConfigSpec{},
+				tpls:    []appsv1.ComponentConfigSpec{},
 				want:    nil,
 				wantErr: false,
 			}, {
 				// config templates without configConstraintObj
 				name: "test",
-				tpls: []v1alpha1.ComponentConfigSpec{{
-					ComponentTemplateSpec: v1alpha1.ComponentTemplateSpec{
+				tpls: []appsv1.ComponentConfigSpec{{
+					ComponentTemplateSpec: appsv1.ComponentTemplateSpec{
 						Name: "for_test",
 					},
 				}, {
-					ComponentTemplateSpec: v1alpha1.ComponentTemplateSpec{
+					ComponentTemplateSpec: appsv1.ComponentTemplateSpec{
 						Name: "for_test2",
 					},
 				}},
@@ -94,19 +95,19 @@ var _ = Describe("config_util", func() {
 			}, {
 				// normal
 				name: "test",
-				tpls: []v1alpha1.ComponentConfigSpec{{
-					ComponentTemplateSpec: v1alpha1.ComponentTemplateSpec{
+				tpls: []appsv1.ComponentConfigSpec{{
+					ComponentTemplateSpec: appsv1.ComponentTemplateSpec{
 						Name: "for_test",
 					},
 					ConfigConstraintRef: "eg_v1",
 				}},
-				want:    mockTpl.Spec.ReloadOptions,
+				want:    mockTpl.Spec.ReloadAction,
 				wantErr: false,
 			}, {
 				// not exist config constraint
 				name: "test",
-				tpls: []v1alpha1.ComponentConfigSpec{{
-					ComponentTemplateSpec: v1alpha1.ComponentTemplateSpec{
+				tpls: []appsv1.ComponentConfigSpec{{
+					ComponentTemplateSpec: appsv1.ComponentTemplateSpec{
 						Name: "for_test",
 					},
 					ConfigConstraintRef: "not_exist",
@@ -190,7 +191,7 @@ func TestApplyConfigPatch(t *testing.T) {
 	type args struct {
 		baseCfg           []byte
 		updatedParameters map[string]string
-		formatConfig      *v1alpha1.FormatterConfig
+		formatConfig      *appsv1beta1.FileFormatConfig
 	}
 	tests := []struct {
 		name    string
@@ -206,10 +207,10 @@ test=test`),
 				"a":               "b",
 				"max_connections": "600",
 			},
-			formatConfig: &v1alpha1.FormatterConfig{
-				Format: v1alpha1.Ini,
-				FormatterOptions: v1alpha1.FormatterOptions{
-					IniConfig: &v1alpha1.IniConfig{
+			formatConfig: &appsv1beta1.FileFormatConfig{
+				Format: appsv1beta1.Ini,
+				FormatterAction: appsv1beta1.FormatterAction{
+					IniConfig: &appsv1beta1.IniConfig{
 						SectionName: "test",
 					}}},
 		},
@@ -227,8 +228,8 @@ test=test
 				"a": "b",
 				"c": "d e f g",
 			},
-			formatConfig: &v1alpha1.FormatterConfig{
-				Format: v1alpha1.RedisCfg,
+			formatConfig: &appsv1beta1.FileFormatConfig{
+				Format: appsv1beta1.RedisCfg,
 			},
 		},
 		want:    "a b\nc d e f g",
@@ -241,8 +242,8 @@ test=test
 				"ENABLE_MODULES":     "true",
 				"HUGGINGFACE_APIKEY": "kssdlsdjskwssl",
 			},
-			formatConfig: &v1alpha1.FormatterConfig{
-				Format: v1alpha1.Dotenv,
+			formatConfig: &appsv1beta1.FileFormatConfig{
+				Format: appsv1beta1.Dotenv,
 			},
 		},
 		// fix begin

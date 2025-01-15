@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -20,8 +20,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 package controllerutil
 
 import (
+	"encoding/json"
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -37,25 +37,10 @@ import (
 	viper "github.com/apecloud/kubeblocks/pkg/viperx"
 )
 
-// statefulPodRegex is a regular expression that extracts the parent StatefulSet and ordinal from the Name of a Pod
-var statefulPodRegex = regexp.MustCompile("(.*)-([0-9]+)$")
-
-// GetParentNameAndOrdinal gets the name of pod's parent StatefulSet and pod's ordinal as extracted from its Name. If
-// the Pod was not created by a StatefulSet, its parent is considered to be empty string, and its ordinal is considered
-// to be -1.
-func GetParentNameAndOrdinal(pod *corev1.Pod) (string, int) {
-	parent := ""
-	ordinal := -1
-	subMatches := statefulPodRegex.FindStringSubmatch(pod.Name)
-	if len(subMatches) < 3 {
-		return parent, ordinal
-	}
-	parent = subMatches[1]
-	if i, err := strconv.ParseInt(subMatches[2], 10, 32); err == nil {
-		ordinal = int(i)
-	}
-	return parent, ordinal
-}
+const (
+	// PodContainerFailedTimeout the timeout for container of pod failures, the component phase will be set to Failed after this time.
+	PodContainerFailedTimeout = 10 * time.Second
+)
 
 // GetContainerByConfigSpec searches for container using the configmap of config from the pod
 //
@@ -336,49 +321,17 @@ func GetIntOrPercentValue(intOrStr *metautil.IntOrString) (int, bool, error) {
 	return v, true, nil
 }
 
-// GetPortByPortName gets the Port from pod by name
-func GetPortByPortName(pod *corev1.Pod, portName string) (int32, error) {
+func GetPortByName(pod corev1.Pod, cname, pname string) (int32, error) {
 	for _, container := range pod.Spec.Containers {
-		for _, port := range container.Ports {
-			if port.Name == portName {
-				return port.ContainerPort, nil
+		if container.Name == cname {
+			for _, port := range container.Ports {
+				if port.Name == pname {
+					return port.ContainerPort, nil
+				}
 			}
 		}
 	}
-	return 0, fmt.Errorf("port %s not found", portName)
-}
-
-func GetLorryGRPCPort(pod *corev1.Pod) (int32, error) {
-	return GetPortByPortName(pod, constant.LorryGRPCPortName)
-}
-
-func GetLorryHTTPPort(pod *corev1.Pod) (int32, error) {
-	return GetPortByPortName(pod, constant.LorryHTTPPortName)
-}
-
-// GuessLorryHTTPPort guesses lorry container and serving port.
-// TODO(xuriwuyun): should provide a deterministic way to find the lorry serving port.
-func GuessLorryHTTPPort(pod *corev1.Pod) (int32, error) {
-	lorryImage := viper.GetString(constant.KBToolsImage)
-	for _, container := range pod.Spec.Containers {
-		if container.Image != lorryImage {
-			continue
-		}
-		if len(container.Ports) > 0 {
-			return container.Ports[0].ContainerPort, nil
-		}
-	}
-	return 0, fmt.Errorf("lorry port not found")
-}
-
-// GetLorryContainerName gets the probe container from pod
-func GetLorryContainerName(pod *corev1.Pod) (string, error) {
-	for _, container := range pod.Spec.Containers {
-		if len(container.Command) > 0 && strings.Contains(container.Command[0], "lorry") {
-			return container.Name, nil
-		}
-	}
-	return "", fmt.Errorf("lorry container not found")
+	return 0, fmt.Errorf("port %s not found", pname)
 }
 
 // PodIsReadyWithLabel checks if pod is ready for ConsensusSet/ReplicationSet component,
@@ -389,11 +342,6 @@ func PodIsReadyWithLabel(pod corev1.Pod) bool {
 	}
 
 	return PodIsReady(&pod)
-}
-
-// PodIsControlledByLatestRevision checks if the pod is controlled by latest controller revision.
-func PodIsControlledByLatestRevision(pod *corev1.Pod, sts *appsv1.StatefulSet) bool {
-	return GetPodRevision(pod) == sts.Status.UpdateRevision && sts.Status.ObservedGeneration == sts.Generation
 }
 
 // GetPodRevision gets the revision of Pod by inspecting the StatefulSetRevisionLabel. If pod has no revision empty
@@ -440,4 +388,175 @@ func BuildPodHostDNS(pod *corev1.Pod) string {
 		return strings.Join(hostDNS, ".")
 	}
 	return pod.Status.PodIP
+}
+
+// ResolvePodSpecDefaultFields set default value for some known fields of proto PodSpec @pobj.
+func ResolvePodSpecDefaultFields(obj corev1.PodSpec, pobj *corev1.PodSpec) {
+	resolveVolume := func(v corev1.Volume, vv *corev1.Volume) {
+		if vv.DownwardAPI != nil && v.DownwardAPI != nil {
+			for i := range vv.DownwardAPI.Items {
+				vf := v.DownwardAPI.Items[i]
+				if vf.FieldRef == nil {
+					continue
+				}
+				vvf := &vv.DownwardAPI.Items[i]
+				if vvf.FieldRef != nil && len(vvf.FieldRef.APIVersion) == 0 {
+					vvf.FieldRef.APIVersion = vf.FieldRef.APIVersion
+				}
+			}
+			if vv.DownwardAPI.DefaultMode == nil {
+				vv.DownwardAPI.DefaultMode = v.DownwardAPI.DefaultMode
+			}
+		}
+		if vv.ConfigMap != nil && v.ConfigMap != nil {
+			if vv.ConfigMap.DefaultMode == nil {
+				vv.ConfigMap.DefaultMode = v.ConfigMap.DefaultMode
+			}
+		}
+	}
+	for i := 0; i < min(len(obj.Volumes), len(pobj.Volumes)); i++ {
+		resolveVolume(obj.Volumes[i], &pobj.Volumes[i])
+	}
+	for i := 0; i < min(len(obj.InitContainers), len(pobj.InitContainers)); i++ {
+		ResolveContainerDefaultFields(obj.InitContainers[i], &pobj.InitContainers[i])
+	}
+	for i := 0; i < min(len(obj.Containers), len(pobj.Containers)); i++ {
+		ResolveContainerDefaultFields(obj.Containers[i], &pobj.Containers[i])
+	}
+	if len(pobj.RestartPolicy) == 0 {
+		pobj.RestartPolicy = obj.RestartPolicy
+	}
+	if pobj.TerminationGracePeriodSeconds == nil {
+		pobj.TerminationGracePeriodSeconds = obj.TerminationGracePeriodSeconds
+	}
+	if len(pobj.DNSPolicy) == 0 {
+		pobj.DNSPolicy = obj.DNSPolicy
+	}
+	if len(pobj.DeprecatedServiceAccount) == 0 {
+		pobj.DeprecatedServiceAccount = obj.DeprecatedServiceAccount
+	}
+	if pobj.SecurityContext == nil {
+		pobj.SecurityContext = obj.SecurityContext
+	}
+	if len(pobj.SchedulerName) == 0 {
+		pobj.SchedulerName = obj.SchedulerName
+	}
+	if len(pobj.Tolerations) == 0 {
+		pobj.Tolerations = obj.Tolerations
+	}
+	if pobj.Priority == nil {
+		pobj.Priority = obj.Priority
+	}
+	if pobj.EnableServiceLinks == nil {
+		pobj.EnableServiceLinks = obj.EnableServiceLinks
+	}
+	if pobj.PreemptionPolicy == nil {
+		pobj.PreemptionPolicy = obj.PreemptionPolicy
+	}
+}
+
+// ResolveContainerDefaultFields set default value for some known fields of proto Container @pcontainer.
+func ResolveContainerDefaultFields(container corev1.Container, pcontainer *corev1.Container) {
+	if len(pcontainer.TerminationMessagePath) == 0 {
+		pcontainer.TerminationMessagePath = container.TerminationMessagePath
+	}
+	if len(pcontainer.TerminationMessagePolicy) == 0 {
+		pcontainer.TerminationMessagePolicy = container.TerminationMessagePolicy
+	}
+	if len(pcontainer.ImagePullPolicy) == 0 {
+		pcontainer.ImagePullPolicy = container.ImagePullPolicy
+	}
+
+	resolveContainerProbe := func(p corev1.Probe, pp *corev1.Probe) {
+		if pp.TimeoutSeconds == 0 {
+			pp.TimeoutSeconds = p.TimeoutSeconds
+		}
+		if pp.PeriodSeconds == 0 {
+			pp.PeriodSeconds = p.PeriodSeconds
+		}
+		if pp.SuccessThreshold == 0 {
+			pp.SuccessThreshold = p.SuccessThreshold
+		}
+		if pp.FailureThreshold == 0 {
+			pp.FailureThreshold = p.FailureThreshold
+		}
+		if pp.HTTPGet != nil && len(pp.HTTPGet.Scheme) == 0 {
+			if p.HTTPGet != nil {
+				pp.HTTPGet.Scheme = p.HTTPGet.Scheme
+			}
+		}
+	}
+	if pcontainer.LivenessProbe != nil && container.LivenessProbe != nil {
+		resolveContainerProbe(*container.LivenessProbe, pcontainer.LivenessProbe)
+	}
+	if pcontainer.ReadinessProbe != nil && container.ReadinessProbe != nil {
+		resolveContainerProbe(*container.ReadinessProbe, pcontainer.ReadinessProbe)
+	}
+	if pcontainer.StartupProbe != nil && container.StartupProbe != nil {
+		resolveContainerProbe(*container.StartupProbe, pcontainer.StartupProbe)
+	}
+}
+
+// GetPodContainer gets the pod container by name. if containerName is empty, return the first container.
+func GetPodContainer(pod *corev1.Pod, containerName string) *corev1.Container {
+	if containerName == "" {
+		return &pod.Spec.Containers[0]
+	}
+	for i := range pod.Spec.Containers {
+		container := pod.Spec.Containers[i]
+		if container.Name == containerName {
+			return &container
+		}
+	}
+	return nil
+}
+
+// IsPodFailedAndTimedOut checks if the pod is failed and timed out.
+func IsPodFailedAndTimedOut(pod *corev1.Pod) (bool, bool, string) {
+	initContainerFailed, message := isAnyContainerFailed(pod.Status.InitContainerStatuses)
+	if initContainerFailed {
+		return initContainerFailed, isContainerFailedAndTimedOut(pod, corev1.PodInitialized), message
+	}
+	containerFailed, message := isAnyContainerFailed(pod.Status.ContainerStatuses)
+	if containerFailed {
+		return containerFailed, isContainerFailedAndTimedOut(pod, corev1.ContainersReady), message
+	}
+	return false, false, ""
+}
+
+// IsAnyContainerFailed checks whether any container in the list is failed.
+func isAnyContainerFailed(containersStatus []corev1.ContainerStatus) (bool, string) {
+	for _, v := range containersStatus {
+		waitingState := v.State.Waiting
+		if waitingState != nil && waitingState.Message != "" {
+			return true, waitingState.Message
+		}
+		terminatedState := v.State.Terminated
+		if terminatedState != nil && terminatedState.ExitCode != 0 {
+			return true, terminatedState.Message
+		}
+	}
+	return false, ""
+}
+
+// IsContainerFailedAndTimedOut checks whether the failed container has timed out.
+func isContainerFailedAndTimedOut(pod *corev1.Pod, podConditionType corev1.PodConditionType) bool {
+	containerReadyCondition := GetPodCondition(&pod.Status, podConditionType)
+	if containerReadyCondition == nil || containerReadyCondition.LastTransitionTime.IsZero() {
+		return false
+	}
+	return time.Now().After(containerReadyCondition.LastTransitionTime.Add(PodContainerFailedTimeout))
+}
+
+func BuildImagePullSecrets() []corev1.LocalObjectReference {
+	secrets := make([]corev1.LocalObjectReference, 0)
+	secretsVal := viper.GetString(constant.KBImagePullSecrets)
+	if secretsVal == "" {
+		return secrets
+	}
+
+	// we already validate the value of KBImagePullSecrets when start server,
+	// so we can ignore the error here
+	_ = json.Unmarshal([]byte(secretsVal), &secrets)
+	return secrets
 }

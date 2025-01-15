@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -20,83 +20,59 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 package component
 
 import (
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
-	"github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
-	workloads "github.com/apecloud/kubeblocks/apis/workloads/v1alpha1"
+	kbappsv1 "github.com/apecloud/kubeblocks/apis/apps/v1"
 )
 
-type MonitorConfig struct {
-	Enable     bool   `json:"enable"`
-	BuiltIn    bool   `json:"builtIn"`
-	ScrapePort int32  `json:"scrapePort,omitempty"`
-	ScrapePath string `json:"scrapePath,omitempty"`
-}
-
 type SynthesizedComponent struct {
-	Namespace            string                                 `json:"namespace,omitempty"`
-	ClusterName          string                                 `json:"clusterName,omitempty"`
-	ClusterUID           string                                 `json:"clusterUID,omitempty"`
-	Comp2CompDefs        map[string]string                      `json:"comp2CompDefs,omitempty"` // {compName: compDefName}
-	Name                 string                                 `json:"name,omitempty"`          // the name of the component without clusterName prefix
-	FullCompName         string                                 `json:"fullCompName,omitempty"`  // the full name of the component with clusterName prefix
-	CompDefName          string                                 `json:"compDefName,omitempty"`   // the name of the componentDefinition
-	Replicas             int32                                  `json:"replicas"`
-	PodSpec              *corev1.PodSpec                        `json:"podSpec,omitempty"`
-	VolumeClaimTemplates []corev1.PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
-	Monitor              *MonitorConfig                         `json:"monitor,omitempty"`
-	EnabledLogs          []string                               `json:"enabledLogs,omitempty"`
-	LogConfigs           []v1alpha1.LogConfig                   `json:"logConfigs,omitempty"`
-	ConfigTemplates      []v1alpha1.ComponentConfigSpec         `json:"configTemplates,omitempty"`
-	ScriptTemplates      []v1alpha1.ComponentTemplateSpec       `json:"scriptTemplates,omitempty"`
-	TLSConfig            *v1alpha1.TLSConfig                    `json:"tlsConfig"`
-	ServiceAccountName   string                                 `json:"serviceAccountName,omitempty"`
-	// TODO: remove this later
-	ComponentRefEnvs  []corev1.EnvVar                        `json:"componentRefEnvs,omitempty"`
-	ServiceReferences map[string]*v1alpha1.ServiceDescriptor `json:"serviceReferences,omitempty"`
-	TemplateVars      map[string]any                         `json:"templateVars,omitempty"`
-
-	RsmTransformPolicy workloads.RsmTransformPolicy `json:"rsmTransformPolicy,omitempty"`
-	Nodes              []types.NodeName             `json:"nodes,omitempty"`
-	Instances          []string                     `json:"instances,omitempty"`
-
-	NodesAssignment []workloads.NodeAssignment `json:"nodesAssignment,omitempty"`
-
-	// The following fields were introduced with the ComponentDefinition and Component API in KubeBlocks version 0.8.0
-	Roles             []v1alpha1.ReplicaRole              `json:"roles,omitempty"`
-	Labels            map[string]string                   `json:"labels,omitempty"`
-	UpdateStrategy    *v1alpha1.UpdateStrategy            `json:"updateStrategy,omitempty"`
-	PolicyRules       []rbacv1.PolicyRule                 `json:"policyRules,omitempty"`
-	LifecycleActions  *v1alpha1.ComponentLifecycleActions `json:"lifecycleActions,omitempty"`
-	SystemAccounts    []v1alpha1.SystemAccount            `json:"systemAccounts,omitempty"`
-	RoleArbitrator    *v1alpha1.RoleArbitrator            `json:"roleArbitrator,omitempty"`
-	Volumes           []v1alpha1.ComponentVolume          `json:"volumes,omitempty"`
-	ComponentServices []v1alpha1.Service                  `json:"componentServices,omitempty"`
-
-	// TODO(xingran): The following fields will be deprecated after version 0.8.0 and will be replaced with a new data structure.
-	CustomLabelSpecs    []v1alpha1.CustomLabelSpec        `json:"customLabelSpecs,omitempty"`    // The CustomLabelSpecs will be replaced with Labels in the future.
-	Probes              *v1alpha1.ClusterDefinitionProbes `json:"probes,omitempty"`              // The Probes will be replaced with LifecycleActions.RoleProbe in the future.
-	VolumeTypes         []v1alpha1.VolumeTypeSpec         `json:"volumeTypes,omitempty"`         // The VolumeTypes will be replaced with Volumes in the future.
-	VolumeProtection    *v1alpha1.VolumeProtectionSpec    `json:"volumeProtection,omitempty"`    // The VolumeProtection will be replaced with Volumes in the future.
-	Services            []corev1.Service                  `json:"services,omitempty"`            // The Services will be replaced with ComponentServices in the future.
-	StatefulSetWorkload v1alpha1.StatefulSetWorkload      `json:"statefulSetWorkload,omitempty"` // The StatefulSetWorkload will be replaced with UpdateStrategy in the future.
-
-	// TODO(xingran): The following fields will be deprecated after KubeBlocks version 0.8.0
-	ClusterDefName        string                          `json:"clusterDefName,omitempty"`     // the name of the clusterDefinition
-	ClusterCompDefName    string                          `json:"clusterCompDefName,omitempty"` // the name of the clusterDefinition.Spec.ComponentDefs[*].Name or cluster.Spec.ComponentSpecs[*].ComponentDefRef
-	CharacterType         string                          `json:"characterType,omitempty"`
-	WorkloadType          v1alpha1.WorkloadType           `json:"workloadType,omitempty"`
-	StatelessSpec         *v1alpha1.StatelessSetSpec      `json:"statelessSpec,omitempty"`
-	StatefulSpec          *v1alpha1.StatefulSetSpec       `json:"statefulSpec,omitempty"`
-	ConsensusSpec         *v1alpha1.ConsensusSetSpec      `json:"consensusSpec,omitempty"`
-	ReplicationSpec       *v1alpha1.ReplicationSetSpec    `json:"replicationSpec,omitempty"`
-	RSMSpec               *v1alpha1.RSMSpec               `json:"rsmSpec,omitempty"`
-	HorizontalScalePolicy *v1alpha1.HorizontalScalePolicy `json:"horizontalScalePolicy,omitempty"`
-	// MinAvailable is used to determine whether to create a PDB (Pod Disruption Budget) object.
-	// However, the functionality of PDB should be implemented within the RSM. Therefore, PDB objects are no longer needed in the new API, and the MinAvailable field should be deprecated.
-	// The old MinAvailable field, which is determined based on the deprecated "workloadType" field, is also no longer applicable in the new API.
-	MinAvailable *intstr.IntOrString `json:"minAvailable,omitempty"`
+	Namespace                        string            `json:"namespace,omitempty"`
+	ClusterName                      string            `json:"clusterName,omitempty"`
+	ClusterUID                       string            `json:"clusterUID,omitempty"`
+	Comp2CompDefs                    map[string]string `json:"comp2CompDefs,omitempty"` // {compName: compDefName}
+	Name                             string            `json:"name,omitempty"`          // the name of the component w/o clusterName prefix
+	FullCompName                     string            `json:"fullCompName,omitempty"`  // the full name of the component w/ clusterName prefix
+	Generation                       string
+	CompDefName                      string `json:"compDefName,omitempty"` // the name of the componentDefinition
+	ServiceKind                      string
+	ServiceVersion                   string                                 `json:"serviceVersion,omitempty"`
+	Replicas                         int32                                  `json:"replicas"`
+	Resources                        corev1.ResourceRequirements            `json:"resources,omitempty"`
+	PodSpec                          *corev1.PodSpec                        `json:"podSpec,omitempty"`
+	SidecarVars                      []kbappsv1.EnvVar                      // vars defined by sidecars
+	VolumeClaimTemplates             []corev1.PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
+	LogConfigs                       []kbappsv1.LogConfig                   `json:"logConfigs,omitempty"`
+	ConfigTemplates                  []kbappsv1.ComponentConfigSpec         `json:"configTemplates,omitempty"`
+	ScriptTemplates                  []kbappsv1.ComponentTemplateSpec       `json:"scriptTemplates,omitempty"`
+	TLSConfig                        *kbappsv1.TLSConfig                    `json:"tlsConfig"`
+	ServiceAccountName               string                                 `json:"serviceAccountName,omitempty"`
+	ServiceReferences                map[string]*kbappsv1.ServiceDescriptor `json:"serviceReferences,omitempty"`
+	Labels                           map[string]string                      `json:"labels,omitempty"`
+	StaticLabels                     map[string]string                      // labels defined by the component definition
+	DynamicLabels                    map[string]string                      // labels defined by the cluster and component API
+	Annotations                      map[string]string                      `json:"annotations,omitempty"`
+	StaticAnnotations                map[string]string                      // annotations defined by the component definition
+	DynamicAnnotations               map[string]string                      // annotations defined by the cluster and component API
+	TemplateVars                     map[string]any                         `json:"templateVars,omitempty"`
+	EnvVars                          []corev1.EnvVar                        `json:"envVars,omitempty"`
+	EnvFromSources                   []corev1.EnvFromSource                 `json:"envFromSources,omitempty"`
+	Instances                        []kbappsv1.InstanceTemplate            `json:"instances,omitempty"`
+	OfflineInstances                 []string                               `json:"offlineInstances,omitempty"`
+	Roles                            []kbappsv1.ReplicaRole                 `json:"roles,omitempty"`
+	UpdateStrategy                   *kbappsv1.UpdateStrategy               `json:"updateStrategy,omitempty"`
+	PodManagementPolicy              *appsv1.PodManagementPolicyType        `json:"podManagementPolicy,omitempty"`
+	ParallelPodManagementConcurrency *intstr.IntOrString                    `json:"parallelPodManagementConcurrency,omitempty"`
+	PodUpdatePolicy                  *kbappsv1.PodUpdatePolicyType          `json:"podUpdatePolicy,omitempty"`
+	PolicyRules                      []rbacv1.PolicyRule                    `json:"policyRules,omitempty"`
+	LifecycleActions                 *kbappsv1.ComponentLifecycleActions    `json:"lifecycleActions,omitempty"`
+	SystemAccounts                   []kbappsv1.SystemAccount               `json:"systemAccounts,omitempty"`
+	Volumes                          []kbappsv1.ComponentVolume             `json:"volumes,omitempty"`
+	HostNetwork                      *kbappsv1.HostNetwork                  `json:"hostNetwork,omitempty"`
+	ComponentServices                []kbappsv1.ComponentService            `json:"componentServices,omitempty"`
+	MinReadySeconds                  int32                                  `json:"minReadySeconds,omitempty"`
+	DisableExporter                  *bool                                  `json:"disableExporter,omitempty"`
+	Stop                             *bool
 }

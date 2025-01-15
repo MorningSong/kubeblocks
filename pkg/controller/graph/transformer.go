@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -25,15 +25,15 @@ import (
 
 	"github.com/go-logr/logr"
 	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/apecloud/kubeblocks/pkg/controller/client"
 	intctrlutil "github.com/apecloud/kubeblocks/pkg/controllerutil"
 )
 
 // TransformContext is used by Transformer.Transform
 type TransformContext interface {
 	GetContext() context.Context
-	GetClient() client.ReadonlyClient
+	GetClient() client.Reader
 	GetRecorder() record.EventRecorder
 	GetLogger() logr.Logger
 }

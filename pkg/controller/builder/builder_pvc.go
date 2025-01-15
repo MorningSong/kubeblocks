@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -31,7 +31,7 @@ func NewPVCBuilder(namespace, name string) *PVCBuilder {
 	return builder
 }
 
-func (builder *PVCBuilder) SetResources(resources corev1.ResourceRequirements) *PVCBuilder {
+func (builder *PVCBuilder) SetResources(resources corev1.VolumeResourceRequirements) *PVCBuilder {
 	builder.get().Spec.Resources = resources
 	return builder
 }
@@ -48,5 +48,10 @@ func (builder *PVCBuilder) SetStorageClass(sc string) *PVCBuilder {
 
 func (builder *PVCBuilder) SetDataSource(dataSource corev1.TypedLocalObjectReference) *PVCBuilder {
 	builder.get().Spec.DataSource = &dataSource
+	return builder
+}
+
+func (builder *PVCBuilder) SetSpec(spec corev1.PersistentVolumeClaimSpec) *PVCBuilder {
+	builder.get().Spec = spec
 	return builder
 }

@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -29,12 +29,13 @@ import (
 	"github.com/golang/mock/gomock"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	workloads "github.com/apecloud/kubeblocks/apis/workloads/v1alpha1"
+	workloads "github.com/apecloud/kubeblocks/apis/workloads/v1"
 	"github.com/apecloud/kubeblocks/pkg/constant"
 	"github.com/apecloud/kubeblocks/pkg/controller/builder"
 	"github.com/apecloud/kubeblocks/pkg/controller/model"
@@ -47,23 +48,25 @@ var _ = Describe("handler builder test.", func() {
 			namespace := "foo"
 			clusterName := "bar"
 			componentName := "test"
-			rsmName := fmt.Sprintf("%s-%s", clusterName, componentName)
-			stsName := rsmName
+			name := fmt.Sprintf("%s-%s", clusterName, componentName)
+			stsName := name
 			podName := stsName + "-0"
 			eventName := podName + ".123456"
 			labels := map[string]string{
 				constant.AppManagedByLabelKey:   constant.AppName,
-				constant.AppNameLabelKey:        clusterName + "def",
-				constant.AppComponentLabelKey:   componentName + "def",
 				constant.AppInstanceLabelKey:    clusterName,
 				constant.KBAppComponentLabelKey: componentName,
 			}
-			rsm := builder.NewReplicatedStateMachineBuilder(namespace, rsmName).
+			its := builder.NewInstanceSetBuilder(namespace, name).
 				AddLabelsInMap(labels).
 				GetObject()
-			sts := builder.NewStatefulSetBuilder(namespace, stsName).
-				AddLabelsInMap(labels).
-				GetObject()
+			sts := &appsv1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: namespace,
+					Name:      stsName,
+					Labels:    labels,
+				},
+			}
 			pod := builder.NewPodBuilder(namespace, podName).
 				SetOwnerReferences("apps/v1", "StatefulSet", sts).
 				GetObject()
@@ -86,7 +89,7 @@ var _ = Describe("handler builder test.", func() {
 			handler := NewBuilder(finderCtx).
 				AddFinder(NewInvolvedObjectFinder(&corev1.Pod{})).
 				AddFinder(NewOwnerFinder(&appsv1.StatefulSet{})).
-				AddFinder(NewDelegatorFinder(&workloads.ReplicatedStateMachine{},
+				AddFinder(NewDelegatorFinder(&workloads.InstanceSet{},
 					[]string{constant.AppInstanceLabelKey, constant.KBAppComponentLabelKey})).
 				Build()
 
@@ -127,13 +130,13 @@ var _ = Describe("handler builder test.", func() {
 				By(fmt.Sprintf("test %s interface", c.name))
 				k8sMock.EXPECT().
 					Get(gomock.Any(), gomock.Any(), &appsv1.StatefulSet{}, gomock.Any()).
-					DoAndReturn(func(_ context.Context, objKey client.ObjectKey, stsTmp *appsv1.StatefulSet, _ ...client.ListOptions) error {
+					DoAndReturn(func(_ context.Context, objKey client.ObjectKey, stsTmp *appsv1.StatefulSet, _ ...client.GetOption) error {
 						*stsTmp = *sts
 						return nil
 					}).Times(c.getTimes)
 				k8sMock.EXPECT().
 					Get(gomock.Any(), gomock.Any(), &corev1.Pod{}, gomock.Any()).
-					DoAndReturn(func(_ context.Context, objKey client.ObjectKey, podTmp *corev1.Pod, _ ...client.ListOptions) error {
+					DoAndReturn(func(_ context.Context, objKey client.ObjectKey, podTmp *corev1.Pod, _ ...client.GetOption) error {
 						*podTmp = *pod
 						return nil
 					}).Times(c.getTimes)
@@ -142,8 +145,8 @@ var _ = Describe("handler builder test.", func() {
 				Expect(shutdown).Should(BeFalse())
 				request, ok := item.(reconcile.Request)
 				Expect(ok).Should(BeTrue())
-				Expect(request.Namespace).Should(Equal(rsm.Namespace))
-				Expect(request.Name).Should(Equal(rsm.Name))
+				Expect(request.Namespace).Should(Equal(its.Namespace))
+				Expect(request.Name).Should(Equal(its.Name))
 				queue.Done(item)
 				queue.Forget(item)
 			}

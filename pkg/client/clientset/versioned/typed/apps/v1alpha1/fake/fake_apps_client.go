@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,10 +28,6 @@ type FakeAppsV1alpha1 struct {
 	*testing.Fake
 }
 
-func (c *FakeAppsV1alpha1) BackupPolicyTemplates() v1alpha1.BackupPolicyTemplateInterface {
-	return &FakeBackupPolicyTemplates{c}
-}
-
 func (c *FakeAppsV1alpha1) Clusters(namespace string) v1alpha1.ClusterInterface {
 	return &FakeClusters{c, namespace}
 }
@@ -40,36 +36,20 @@ func (c *FakeAppsV1alpha1) ClusterDefinitions() v1alpha1.ClusterDefinitionInterf
 	return &FakeClusterDefinitions{c}
 }
 
-func (c *FakeAppsV1alpha1) ClusterVersions() v1alpha1.ClusterVersionInterface {
-	return &FakeClusterVersions{c}
-}
-
 func (c *FakeAppsV1alpha1) Components(namespace string) v1alpha1.ComponentInterface {
 	return &FakeComponents{c, namespace}
-}
-
-func (c *FakeAppsV1alpha1) ComponentClassDefinitions() v1alpha1.ComponentClassDefinitionInterface {
-	return &FakeComponentClassDefinitions{c}
 }
 
 func (c *FakeAppsV1alpha1) ComponentDefinitions() v1alpha1.ComponentDefinitionInterface {
 	return &FakeComponentDefinitions{c}
 }
 
-func (c *FakeAppsV1alpha1) ComponentResourceConstraints() v1alpha1.ComponentResourceConstraintInterface {
-	return &FakeComponentResourceConstraints{c}
+func (c *FakeAppsV1alpha1) ComponentVersions() v1alpha1.ComponentVersionInterface {
+	return &FakeComponentVersions{c}
 }
 
 func (c *FakeAppsV1alpha1) ConfigConstraints() v1alpha1.ConfigConstraintInterface {
 	return &FakeConfigConstraints{c}
-}
-
-func (c *FakeAppsV1alpha1) OpsDefinitions() v1alpha1.OpsDefinitionInterface {
-	return &FakeOpsDefinitions{c}
-}
-
-func (c *FakeAppsV1alpha1) OpsRequests(namespace string) v1alpha1.OpsRequestInterface {
-	return &FakeOpsRequests{c, namespace}
 }
 
 func (c *FakeAppsV1alpha1) ServiceDescriptors(namespace string) v1alpha1.ServiceDescriptorInterface {

@@ -1,4 +1,4 @@
-apiVersion: storage.kubeblocks.io/v1alpha1
+apiVersion: dataprotection.kubeblocks.io/v1alpha1
 kind: StorageProvider
 metadata:
   name: s3
@@ -25,7 +25,7 @@ spec:
     parameters:
       mounter: geesefs
       # you can set mount options here, for example limit memory cache size (recommended)
-      options: {{ `{{ printf "--memory-limit 1000 --dir-mode 0777 --file-mode 0666 %s --region %s" (index .Parameters "mountOptions") (index .Parameters "region") }}` }}
+      options: {{ `{{ printf "--memory-limit %s --read-ahead-large %s --dir-mode 0777 --file-mode 0666 %s --region %s" .Parameters.geesefsMemoryLimit .Parameters.geesefsReadAheadLarge .Parameters.mountOptions .Parameters.region }}` }}
       bucket: {{ `{{ index .Parameters "bucket" }}` }}
       csi.storage.k8s.io/provisioner-secret-name: {{ `{{ .CSIDriverSecretRef.Name }}` }}
       csi.storage.k8s.io/provisioner-secret-namespace: {{ `{{ .CSIDriverSecretRef.Namespace }}` }}
@@ -46,6 +46,7 @@ spec:
     region = {{ `{{ index .Parameters "region" }}` }}
     endpoint = {{ `{{ index .Parameters "endpoint" }}` }}
     root = {{ `{{ index .Parameters "bucket" }}` }}
+    no_check_certificate = {{ `{{ index .Parameters "insecure" }}` }}
     chunk_size = 50Mi
 
   parametersSchema:
@@ -63,13 +64,25 @@ spec:
           description: "S3 endpoint (optional)"
         mountOptions:
           type: string
-          description: "mount options for geesefs"
+          description: "Extra mount options for geesefs"
+        geesefsMemoryLimit:
+          type: integer
+          default: 512
+          description: "The value of --memory-limit parameter for geesefs, in MB"
+        geesefsReadAheadLarge:
+          type: integer
+          default: 20480
+          description: "The value of --read-ahead-large parameter for geesefs, in KB"
         accessKeyId:
           type: string
           description: "AWS access key"
         secretAccessKey:
           type: string
           description: "AWS secret key"
+        insecure:
+          type: boolean
+          default: false
+          description: "Do not verify the server SSL certificate"
 
       required:
         - bucket

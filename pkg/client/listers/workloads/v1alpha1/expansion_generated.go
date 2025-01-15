@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,10 +18,10 @@ limitations under the License.
 
 package v1alpha1
 
-// ReplicatedStateMachineListerExpansion allows custom methods to be added to
-// ReplicatedStateMachineLister.
-type ReplicatedStateMachineListerExpansion interface{}
+// InstanceSetListerExpansion allows custom methods to be added to
+// InstanceSetLister.
+type InstanceSetListerExpansion interface{}
 
-// ReplicatedStateMachineNamespaceListerExpansion allows custom methods to be added to
-// ReplicatedStateMachineNamespaceLister.
-type ReplicatedStateMachineNamespaceListerExpansion interface{}
+// InstanceSetNamespaceListerExpansion allows custom methods to be added to
+// InstanceSetNamespaceLister.
+type InstanceSetNamespaceListerExpansion interface{}

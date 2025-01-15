@@ -6,158 +6,273 @@ sidebar_position: 1
 sidebar_label: Create
 ---
 
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
 # Create a Kafka cluster
 
 This document shows how to create a Kafka cluster.
 
 ## Before you start
 
-* [Install kbcli](./../../installation/install-with-kbcli/install-kbcli.md). 
-* Install KubeBlocks: You can install KubeBlocks by [kbcli](./../../installation/install-with-kbcli/install-kubeblocks-with-kbcli.md) or by [Helm](./../../installation/install-with-helm/install-kubeblocks-with-helm.md).
-* Make sure kafka addon is enabled with `kbcli addon list`.
+* [Install kbcli](./../../installation/install-kbcli.md) if you want to create a Kafka cluster by `kbcli`.
+* [Install KubeBlocks](./../../installation/install-kubeblocks.md).
+* Make sure Kafka Addon is enabled with `kbcli addon list`. If this Addon is not enabled, [enable it](./../../installation/install-addons.md) first.
+
+  <Tabs>
+
+  <TabItem value="kubectl" label="kubectl" default>
+
+  ```bash
+  kubectl get addons.extensions.kubeblocks.io kafka
+  >
+  NAME    TYPE   VERSION   PROVIDER   STATUS    AGE
+  kafka   Helm                        Enabled   13m
+  ```
+
+  </TabItem>
+
+  <TabItem value="kbcli" label="kbcli">
 
   ```bash
   kbcli addon list
   >
-  NAME                           TYPE   STATUS     EXTRAS         AUTO-INSTALL   INSTALLABLE-SELECTOR
+  NAME                           TYPE   STATUS     EXTRAS         AUTO-INSTALL  
   ...
-  kafka                        Helm   Enabled                   true
+  kafka                          Helm   Enabled                   true
   ...
+  ```
+
+  </TabItem>
+
+  </Tabs>
+
+* To keep things isolated, create a separate namespace called `demo` throughout this tutorial.
+
+  ```bash
+  kubectl create namespace demo
   ```
 
 :::note
 
 * KubeBlocks integrates Kafka v3.3.2, running it in KRaft mode.
-* You are not recommended to use kraft cluster in combined mode in production environment.
+* You are not recommended to use kraft cluster in combined mode in a production environment.
 * The controller number suggested ranges from 3 to 5, out of complexity and availability.
 
 :::
+
 ## Create a Kafka cluster
 
 <Tabs>
-<TabItem value="using kbcli" label="Using kbcli" default>
 
-The cluster creation command is simply `kbcli cluster create`. Further, you can customize your cluster resources as demanded by using the `--set` flag.
+<TabItem value="kubectl" label="kubectl" default>
 
-```bash
-kbcli cluster create kafka
-```
+1. Create a Kafka cluster. If you only have one node for deploying a cluster with multiple replicas, configure the cluster affinity by setting `spec.schedulingPolicy` or `spec.componentSpecs.schedulingPolicy`. For details, you can refer to the [API docs](https://kubeblocks.io/docs/preview/developer_docs/api-reference/cluster#apps.kubeblocks.io/v1.SchedulingPolicy). But for a production environment, it is not recommended to deploy all replicas on one node, which may decrease the cluster availability.
 
-See the table below for detailed descriptions of customizable parameters, setting the `--termination-policy` is necessary, and you are strongly recommended to turn on the monitor and enable all logs.
+   For more cluster examples, refer to [the GitHub repository](https://github.com/apecloud/kubeblocks-addons/tree/main/examples/kafka).
 
-📎 Table 1. kbcli cluster create flags description
+   * Create a Kafka cluster in combined mode.
 
-| Option                                                                    | Description                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-|---------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| --mode='combined'                                                         | Mode for Kafka kraft cluster, 'combined' is combined Kafka controller and broker,'separated' is broker and controller running independently. Legal values [combined, separated]                                                                                                                                                                                                                                                                   |
-| --replicas=1                                                              | The number of Kafka broker replicas for combined mode. In combined mode, this number also refers to the number of the kraft controller. Valid value range[1,3,5]                                                                                                                                                                                                                                                                                  |
-| --broker-replicas=1                                                       | The number of Kafka broker replicas for separated mode.                                                                                                                                                                                                                                                                                                                                                                                           |
-| --controller-replicas=1                                                   | The number of Kafka controller replicas for separated mode. In separated mode, this number refers to the number of kraft controller. Valid value range [1,3,5]                                                                                                                                                                                                                                                                                    |
-| --termination-policy='Delete'                                             | The termination policy of cluster. Legal values [DoNotTerminate, Halt, Delete, WipeOut]. <br />- DoNotTerminate: DoNotTerminate blocks the delete operation. <br />- Halt: Halt deletes workload resources such as statefulset, deployment workloads but keeps PVCs. <br />- Delete: Delete is based on Halt and deletes PVCs. - WipeOut: WipeOut is based on Delete and wipes out all volume snapshots and snapshot data from backup storage location. |
-| --storage-enable=false                                                    | Specify whether to enable storage for Kafka.                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| --host-network-accessible=false                                           | Specify whether the cluster can be accessed from within the VPC.                                                                                                                                                                                                                                                                                                                                                                                  |
-| --publicly-accessible=false                                               | Specify whether the cluster can be accessed from the public internet.                                                                                                                                                                                                                                                                                                                                                                             |
-| --broker-heap='-XshowSettings:vm -XX:MaxRAMPercentage=100 -Ddepth=64'     | Kafka broker's jvm heap setting.                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| --controller-heap='-XshowSettings:vm -XX:MaxRAMPercentage=100 -Ddepth=64' | Kafka controller's jvm heap setting for separated mode.  The setting takes effect only when mode='separated'.                                                                                                                                                                                                                                                                                                                                     |
-| --cpu=1                                                                   | CPU cores.                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| --memory=1                                                                | Memory, the unit is Gi.                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| --storage=20                                                              | Data Storage size, the unit is Gi.                                                                                                                                                                                                                                                                                                                                                                                                                |
-| --storage-class=''                                                        | The StorageClass for Kafka Data Storage.                                                                                                                                                                                                                                                                                                                                                                                                          |
-| --meta-storage=5                                                          | Metadata Storage size, the unit is Gi.                                                                                                                                                                                                                                                                                                                                                                                                            |
-| --meta-storage-class=''                                                   | The StorageClass for Kafka Metadata Storage.                                                                                                                                                                                                                                                                                                                                                                                                      |
-| --monitor-enable=false                                                    | Specify whether to enable monitor for Kafka.                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| --monitor-replicas=1                                                      | The number of Kafka monitor replicas.                                                                                                                                                                                                                                                                                                                                                                                                             |
-| --sasl-enable=false                                                       | Specify whether to enable authentication using SASL/PLAIN for Kafka. <br /> -server: admin/kubeblocks <br /> -client: client/kubeblocks  <br /> built-in jaas file stores on /tools/client-ssl.properties                                                                                                                                                                                                                                                                  |
+     ```yaml
+     # Create a kafka cluster in combined mode
+     kubectl apply -f - <<EOF
+     apiVersion: apps.kubeblocks.io/v1
+     kind: Cluster
+     metadata:
+       name: mycluster
+       namespace: demo
+     spec:
+       terminationPolicy: Delete
+       clusterDef: kafka
+       topology: combined_monitor
+       componentSpecs:
+         - name: kafka-combine
+           env:
+             - name: KB_KAFKA_BROKER_HEAP # use this ENV to set BROKER HEAP
+               value: "-XshowSettings:vm -XX:MaxRAMPercentage=100 -Ddepth=64"
+             - name: KB_KAFKA_CONTROLLER_HEAP # use this ENV to set CONTROLLER_HEAP
+               value: "-XshowSettings:vm -XX:MaxRAMPercentage=100 -Ddepth=64"
+             - name: KB_BROKER_DIRECT_POD_ACCESS # set to FALSE for node-port
+               value: "true"
+           replicas: 1
+           resources:
+             limits:
+               cpu: "1"
+               memory: "1Gi"
+             requests:
+               cpu: "0.5"
+               memory: "0.5Gi"
+           volumeClaimTemplates:
+             - name: data
+               spec:
+                 storageClassName: ""
+                 accessModes:
+                   - ReadWriteOnce
+                 resources:
+                   requests:
+                     storage: 20Gi
+             - name: metadata
+               spec:
+                 storageClassName: ""
+                 accessModes:
+                   - ReadWriteOnce
+                 resources:
+                   requests:
+                     storage: 1Gi
+         - name: kafka-exporter 
+           replicas: 1
+           resources:
+             limits:
+               cpu: "0.5"
+               memory: "1Gi"
+             requests:
+               cpu: "0.1"
+               memory: "0.2Gi"
+     EOF
+     ```
+
+   * Create a Kafka cluster in separated mode.
+
+     ```yaml
+     # Create a Kafka cluster in separated mode
+     kubectl apply -f - <<EOF
+     apiVersion: apps.kubeblocks.io/v1
+     kind: Cluster
+     metadata:
+       name: mycluster
+       namespace: demo
+     spec:
+       terminationPolicy: Delete
+       clusterDef: kafka
+       topology: separated_monitor
+       componentSpecs:
+         - name: kafka-broker
+           replicas: 1
+           resources:
+             limits:
+               cpu: "0.5"
+               memory: "0.5Gi"
+             requests:
+               cpu: "0.5"
+               memory: "0.5Gi"
+           env:
+             - name: KB_KAFKA_BROKER_HEAP
+               value: "-XshowSettings:vm -XX:MaxRAMPercentage=100 -Ddepth=64"
+             - name: KB_KAFKA_CONTROLLER_HEAP
+               value: "-XshowSettings:vm -XX:MaxRAMPercentage=100 -Ddepth=64"
+             - name: KB_BROKER_DIRECT_POD_ACCESS
+               value: "true"
+           volumeClaimTemplates:
+             - name: data
+               spec:
+                 storageClassName: ""
+                 accessModes:
+                   - ReadWriteOnce
+                 resources:
+                   requests:
+                     storage: 20Gi
+             - name: metadata
+               spec:
+                 storageClassName: ""
+                 accessModes:
+                   - ReadWriteOnce
+                 resources:
+                   requests:
+                     storage: 1Gi
+         - name: kafka-controller
+           replicas: 1
+           resources:
+             limits:
+               cpu: "0.5"
+               memory: "0.5Gi"
+             requests:
+               cpu: "0.5"
+               memory: "0.5Gi"
+           volumeClaimTemplates:
+             - name: metadata
+               spec:
+                 storageClassName: ""
+                 accessModes:
+                   - ReadWriteOnce
+                 resources:
+                   requests:
+                     storage: 1Gi
+         - name: kafka-exporter
+           replicas: 1
+           resources:
+             limits:
+               cpu: "0.5"
+               memory: "1Gi"
+             requests:
+               cpu: "0.1"
+               memory: "0.2Gi"
+     EOF
+     ```
+
+   | Field                                 | Definition  |
+   |---------------------------------------|--------------------------------------|
+   | `spec.terminationPolicy`              | It is the policy of cluster termination. Valid values are `DoNotTerminate`, `Delete`, `WipeOut`. For the detailed definition, you can refer to [Termination Policy](./delete-kafka-cluster.md#termination-policy). |
+   | `spec.clusterDef` | It specifies the name of the ClusterDefinition to use when creating a Cluster. **Note: DO NOT UPDATE THIS FIELD**. The value must be must be `kafka` to create a Kafka Cluster. |
+   | `spec.topology` | It specifies the name of the ClusterTopology to be used when creating the Cluster. Valid options are: [combined,combined_monitor,separated,separated_monitor]. |
+   | `spec.componentSpecs`                 | It is the list of ClusterComponentSpec objects that define the individual Components that make up a Cluster. This field allows customized configuration of each component within a cluster.   |
+   | `spec.componentSpecs.replicas`        | It specifies the amount of replicas of the component. |
+   | `spec.componentSpecs.resources`       | It specifies the resources required by the Component.  |
+   | `spec.componentSpecs.volumeClaimTemplates` | It specifies a list of PersistentVolumeClaim templates that define the storage requirements for the Component. |
+   | `spec.componentSpecs.volumeClaimTemplates.name` | It refers to the name of a volumeMount defined in `componentDefinition.spec.runtime.containers[*].volumeMounts`. |
+   | `spec.componentSpecs.volumeClaimTemplates.spec.storageClassName` | It is the name of the StorageClass required by the claim. If not specified, the StorageClass annotated with `storageclass.kubernetes.io/is-default-class=true` will be used by default. |
+   | `spec.componentSpecs.volumeClaimTemplates.spec.resources.storage` | You can set the storage size as needed. |
+
+   For more API fields and descriptions, refer to the [API Reference](https://kubeblocks.io/docs/preview/developer_docs/api-reference/cluster).
+
+2. Verify whether this cluster is created successfully.
+
+   ```bash
+   kubectl get cluster mycluster -n demo
+   >
+   NAME        CLUSTER-DEFINITION   VERSION       TERMINATION-POLICY   STATUS    AGE
+   mycluster   kafka                kafka-3.3.2   Delete               Running   2m2s
+   ```
+
 </TabItem>
 
-<TabItem value="using kubectl" label="Using kubectl" default>
+<TabItem value="kbcli" label="kbcli">
 
-* Create a Kafka cluster in combined mode.
+1. Create a Kafka cluster.
 
-    ```bash
-    # create kafka in combined mode 
-    kubectl apply -f - <<EOF
-    apiVersion: apps.kubeblocks.io/v1alpha1
-    kind: Cluster
-    metadata:
-      name: kafka-combined
-      namespace: default
-    spec:
-      affinity:
-        podAntiAffinity: Preferred
-        tenancy: SharedNode
-        topologyKeys:
-        - kubernetes.io/hostname
-      clusterDefinitionRef: kafka
-      clusterVersionRef: kafka-3.3.2
-      componentSpecs:
-      - componentDefRef: kafka-server
-        monitor: false
-        name: broker
-        noCreatePDB: false
-        replicas: 1
-        resources:
-          limits:
-            cpu: "0.5"
-            memory: 0.5Gi
-          requests:
-            cpu: "0.5"
-            memory: 0.5Gi
-        serviceAccountName: kb-kafka-sa
-      terminationPolicy: Delete
-    EOF
-    ```
+   The cluster creation command is simply `kbcli cluster create`.
 
-* Create a Kafka cluster in separated mode.
+   ```bash
+   kbcli cluster create kafka mycluster -n demo
+   ```
 
-    ```bash
-    # Create kafka cluster in separated mode
-    kubectl apply -f - <<EOF
-    apiVersion: apps.kubeblocks.io/v1alpha1
-    kind: Cluster
-    metadata:
-      name: kafka-separated
-      namespace: default
-    spec:
-      affinity:
-        podAntiAffinity: Preferred
-        tenancy: SharedNode
-        topologyKeys:
-        - kubernetes.io/hostname
-      clusterDefinitionRef: kafka
-      clusterVersionRef: kafka-3.3.2
-      componentSpecs:
-      - componentDefRef: controller
-        monitor: false
-        name: controller
-        noCreatePDB: false
-        replicas: 1
-        resources:
-          limits:
-            cpu: "0.5"
-            memory: 0.5Gi
-          requests:
-            cpu: "0.5"
-            memory: 0.5Gi
-        serviceAccountName: kb-kafka-sa
-        tls: false
-      - componentDefRef: kafka-broker
-        monitor: false
-        name: broker
-        noCreatePDB: false
-        replicas: 1
-        resources:
-          limits:
-            cpu: "0.5"
-            memory: 0.5Gi
-          requests:
-            cpu: "0.5"
-            memory: 0.5Gi
-        serviceAccountName: kb-kafka-sa
-        tls: false
-      terminationPolicy: Delete
-    EOF
-    ```
+   kbcli provides more options for creating a Kafka cluster, such as setting cluster version, termination policy, CPU, and memory. You can view these options by adding `--help` or `-h` flag.
+
+   ```bash
+   kbcli cluster create kafka --help
+
+   kbcli cluster create kafka -h
+   ```
+
+   If you only have one node for deploying a cluster with multiple replicas, you can configure the cluster affinity by setting `--pod-anti-affinity`, `--tolerations`, and `--topology-keys` when creating a cluster. But you should note that for a production environment, it is not recommended to deploy all replicas on one node, which may decrease the cluster availability. For example,
+
+   ```bash
+   kbcli cluster create kafka mycluster \
+       --mode='combined' \
+       --replicas=3 \
+       --pod-anti-affinity='Preferred' \
+       --tolerations='node-role.kubeblocks.io/data-plane:NoSchedule' \
+       --topology-keys='null' \
+       --namespace demo
+   ```
+
+2. Verify whether this cluster is created successfully.
+
+   ```bash
+   kbcli cluster list -n demo
+   >
+   NAME        NAMESPACE   CLUSTER-DEFINITION   VERSION       TERMINATION-POLICY   STATUS    CREATED-TIME
+   mycluster   demo        kafka                kafka-3.3.2   Delete               Running   Sep 27,2024 15:15 UTC+0800
+   ```
 
 </TabItem>
 

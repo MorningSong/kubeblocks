@@ -11,7 +11,7 @@ import TabItem from '@theme/TabItem';
 
 # 切换 PostgreSQL 集群
 
-你可以通过执行 kbcli 或 kubectl 命令切换 PostgreSQL 主备版。切换后，KubeBlocks 将修改实例角色。
+您可以通过执行命令切换 PostgreSQL 主备版。切换后，KubeBlocks 将修改实例角色。
 
 ## 开始之前
 
@@ -23,8 +23,8 @@ import TabItem from '@theme/TabItem';
    >
    probes:
      roleProbe:
-       failureThreshold: 3
-       periodSeconds: 2
+       failureThreshold: 2
+       periodSeconds: 1
        timeoutSeconds: 1
    ```
 
@@ -34,31 +34,9 @@ import TabItem from '@theme/TabItem';
 
 <Tabs>
 
-<TabItem value="kbcli" label="kbcli" default>
+<TabItem value="kubectl" label="kubectl" default>
 
-* 不指定主节点实例进行切换。
-
-    ```bash
-    kbcli cluster promote mycluster
-    ```
-
-* 指定一个新的主节点实例进行切换。
-
-    ```bash
-    kbcli cluster promote mycluster --instance='mycluster-postgresql-2'
-    ```
-
-* 如果有多个组件，可以使用 `--component` 参数指定一个组件。
-
-    ```bash
-    kbcli cluster promote mycluster --instance='mycluster-postgresql-2' --component='postgresql'
-    ```
-
-</TabItem>
-
-<TabItem value="kubectl" label="kubectl">
-
-`instanceName` 的值决定了切换过程中是否指定了新的主节点实例。
+`instanceName` 字段的值定义了本次切换是否指定了新的主节点实例。
 
 * 不指定主节点实例进行切换。
 
@@ -67,9 +45,10 @@ import TabItem from '@theme/TabItem';
   apiVersion: apps.kubeblocks.io/v1alpha1
   kind: OpsRequest
   metadata:
-    name: mycluster-switchover-jhkgl
+    name: mycluster-switchover
+    namespace: demo
   spec:
-    clusterRef: mycluster
+    clusterName: mycluster
     type: Switchover
     switchover:
     - componentName: postgresql
@@ -84,9 +63,10 @@ import TabItem from '@theme/TabItem';
   apiVersion: apps.kubeblocks.io/v1alpha1
   kind: OpsRequest
   metadata:
-    name: mycluster-switchover-jhkgl
+    name: mycluster-switchover
+    namespace: demo
   spec:
-    clusterRef: mycluster
+    clusterName: mycluster
     type: Switchover
     switchover:
     - componentName: postgresql
@@ -96,15 +76,55 @@ import TabItem from '@theme/TabItem';
 
 </TabItem>
 
+<TabItem value="kbcli" label="kbcli">
+
+* 不指定主节点实例进行切换。
+
+    ```bash
+    kbcli cluster promote mycluster -n demo
+    ```
+
+* 指定一个新的主节点实例进行切换。
+
+    ```bash
+    kbcli cluster promote mycluster -n demo --instance='mycluster-postgresql-2'
+    ```
+
+* 如果有多个组件，可以使用 `--components` 参数指定一个组件。
+
+    ```bash
+    kbcli cluster promote mycluster -n demo --instance='mycluster-postgresql-2' --components='postgresql'
+    ```
+
+</TabItem>
+
 </Tabs>
 
 ## 验证集群切换
 
 检查实例状态，验证切换是否成功。
 
+<Tabs>
+
+<TabItem value="kubectl" label="kubectl" default>
+
 ```bash
-kbcli cluster list-instances
+kubectl get cluster mycluster -n demo
+
+kubectl -n demo get po -L kubeblocks.io/role 
 ```
+
+</TabItem>
+
+<TabItem value="kbcli" label="kbcli">
+
+```bash
+kbcli cluster list-instances -n demo
+```
+
+</TabItem>
+
+</Tabs>
 
 ## 处理异常情况
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Copyright (C) 2022-2023 ApeCloud Co., Ltd
+# Copyright (C) 2022-2024 ApeCloud Co., Ltd
 # 
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -32,7 +32,7 @@ chmod u+x ${CODE_GENERATOR_PATH}/*.sh
 GENERATORS="client,informer,lister"
 OUTPUT_PACKAGE="github.com/apecloud/kubeblocks/pkg/client"
 APIS_PACKAGE="github.com/apecloud/kubeblocks/apis"
-GROUP_VERSIONS="apps:v1alpha1 dataprotection:v1alpha1 extensions:v1alpha1 workloads:v1alpha1 storage:v1alpha1"
+GROUP_VERSIONS="apps:v1alpha1 apps:v1beta1 apps:v1 dataprotection:v1alpha1 extensions:v1alpha1 operations:v1alpha1 workloads:v1alpha1 workloads:v1"
 OUTPUT_BASE="${SCRIPT_ROOT}/hack"
 
 
@@ -47,4 +47,3 @@ bash ${CODE_GENERATOR_PATH}/generate-groups.sh \
 rm -rf "${SCRIPT_ROOT}/pkg/client"
 mv "${OUTPUT_BASE}/${OUTPUT_PACKAGE}" "${SCRIPT_ROOT}/pkg/client"
 rm -rf "${OUTPUT_BASE}/github.com"
-

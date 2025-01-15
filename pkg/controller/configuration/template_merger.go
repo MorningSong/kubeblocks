@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -24,8 +24,10 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
+	appsv1 "github.com/apecloud/kubeblocks/apis/apps/v1"
+	appsv1beta1 "github.com/apecloud/kubeblocks/apis/apps/v1beta1"
 	"github.com/apecloud/kubeblocks/pkg/configuration/core"
+	"github.com/apecloud/kubeblocks/pkg/controller/render"
 )
 
 type TemplateMerger interface {
@@ -38,22 +40,20 @@ type TemplateMerger interface {
 }
 
 type mergeContext struct {
-	template   appsv1alpha1.ConfigTemplateExtension
-	configSpec appsv1alpha1.ComponentConfigSpec
-	ccSpec     *appsv1alpha1.ConfigConstraintSpec
+	template   appsv1.ConfigTemplateExtension
+	configSpec appsv1.ComponentConfigSpec
+	ccSpec     *appsv1beta1.ConfigConstraintSpec
 
-	builder *configTemplateBuilder
-	ctx     context.Context
-	client  client.Client
+	render.TemplateRender
 }
 
 func (m *mergeContext) renderTemplate() (map[string]string, error) {
-	templateSpec := appsv1alpha1.ComponentTemplateSpec{
+	templateSpec := appsv1.ComponentTemplateSpec{
 		// Name:        m.template.Name,
 		Namespace:   m.template.Namespace,
 		TemplateRef: m.template.TemplateRef,
 	}
-	configs, err := renderConfigMapTemplate(m.builder, templateSpec, m.ctx, m.client)
+	configs, err := m.RenderConfigMapTemplate(templateSpec)
 	if err != nil {
 		return nil, err
 	}
@@ -84,7 +84,7 @@ type configOnlyAddMerger struct {
 }
 
 func (c *configPatcher) Merge(baseData map[string]string, updatedData map[string]string) (map[string]string, error) {
-	formatter := c.ccSpec.FormatterConfig
+	formatter := c.ccSpec.FileFormatConfig
 	configPatch, err := core.TransformConfigPatchFromData(updatedData, formatter.Format, c.configSpec.Keys)
 	if err != nil {
 		return nil, err
@@ -93,21 +93,21 @@ func (c *configPatcher) Merge(baseData map[string]string, updatedData map[string
 		return baseData, nil
 	}
 
-	r := make(map[string]string)
+	mergedData := copyMap(baseData)
 	params := core.GenerateVisualizedParamsList(configPatch, formatter, nil)
 	for key, patch := range splitParameters(params) {
 		v, ok := baseData[key]
 		if !ok {
-			r[key] = updatedData[key]
+			mergedData[key] = updatedData[key]
 			continue
 		}
 		newConfig, err := core.ApplyConfigPatch([]byte(v), patch, formatter)
 		if err != nil {
 			return nil, err
 		}
-		r[key] = newConfig
+		mergedData[key] = newConfig
 	}
-	return r, err
+	return mergedData, err
 }
 
 func (c *configReplaceMerger) Merge(baseData map[string]string, updatedData map[string]string) (map[string]string, error) {
@@ -118,41 +118,43 @@ func (c *configOnlyAddMerger) Merge(baseData map[string]string, updatedData map[
 	return nil, core.MakeError("not implemented")
 }
 
-func NewTemplateMerger(template appsv1alpha1.ConfigTemplateExtension, ctx context.Context, cli client.Client, builder *configTemplateBuilder, configSpec appsv1alpha1.ComponentConfigSpec, ccSpec *appsv1alpha1.ConfigConstraintSpec) (TemplateMerger, error) {
+func NewTemplateMerger(template appsv1.ConfigTemplateExtension,
+	templateRender render.TemplateRender,
+	configSpec appsv1.ComponentConfigSpec,
+	ccSpec *appsv1beta1.ConfigConstraintSpec) (TemplateMerger, error) {
 	templateData := &mergeContext{
 		configSpec: configSpec,
 		template:   template,
-		ctx:        ctx,
-		client:     cli,
-		builder:    builder,
 		ccSpec:     ccSpec,
+
+		TemplateRender: templateRender,
 	}
 
 	var merger TemplateMerger
 	switch template.Policy {
 	default:
 		return nil, core.MakeError("unknown template policy: %s", template.Policy)
-	case appsv1alpha1.NoneMergePolicy:
+	case appsv1.NoneMergePolicy:
 		merger = &noneOp{templateData}
-	case appsv1alpha1.PatchPolicy:
+	case appsv1.PatchPolicy:
 		merger = &configPatcher{templateData}
-	case appsv1alpha1.OnlyAddPolicy:
+	case appsv1.OnlyAddPolicy:
 		merger = &configOnlyAddMerger{templateData}
-	case appsv1alpha1.ReplacePolicy:
+	case appsv1.ReplacePolicy:
 		merger = &configReplaceMerger{templateData}
 	}
 	return merger, nil
 }
 
-func mergerConfigTemplate(template *appsv1alpha1.LegacyRenderedTemplateSpec,
-	builder *configTemplateBuilder,
-	configSpec appsv1alpha1.ComponentConfigSpec,
+func mergerConfigTemplate(template appsv1.ConfigTemplateExtension,
+	templateRender render.TemplateRender,
+	configSpec appsv1.ComponentConfigSpec,
 	baseData map[string]string,
 	ctx context.Context, cli client.Client) (map[string]string, error) {
 	if configSpec.ConfigConstraintRef == "" {
 		return nil, core.MakeError("ConfigConstraintRef require not empty, configSpec[%v]", configSpec.Name)
 	}
-	ccObj := &appsv1alpha1.ConfigConstraint{}
+	ccObj := &appsv1beta1.ConfigConstraint{}
 	ccKey := client.ObjectKey{
 		Namespace: "",
 		Name:      configSpec.ConfigConstraintRef,
@@ -160,11 +162,11 @@ func mergerConfigTemplate(template *appsv1alpha1.LegacyRenderedTemplateSpec,
 	if err := cli.Get(ctx, ccKey, ccObj); err != nil {
 		return nil, core.WrapError(err, "failed to get ConfigConstraint, key[%v]", configSpec)
 	}
-	if ccObj.Spec.FormatterConfig == nil {
-		return nil, core.MakeError("importedConfigTemplate require ConfigConstraint.Spec.FormatterConfig, configSpec[%v]", configSpec)
+	if ccObj.Spec.FileFormatConfig == nil {
+		return nil, core.MakeError("importedConfigTemplate require ConfigConstraint.Spec.FileFormatConfig, configSpec[%v]", configSpec)
 	}
 
-	templateMerger, err := NewTemplateMerger(template.ConfigTemplateExtension, ctx, cli, builder, configSpec, &ccObj.Spec)
+	templateMerger, err := NewTemplateMerger(template, templateRender, configSpec, &ccObj.Spec)
 	if err != nil {
 		return nil, err
 	}

@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2022-2023 ApeCloud Co., Ltd
+Copyright (C) 2022-2024 ApeCloud Co., Ltd
 
 This file is part of KubeBlocks project
 
@@ -25,13 +25,13 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	appsv1alpha1 "github.com/apecloud/kubeblocks/apis/apps/v1alpha1"
+	appsv1beta1 "github.com/apecloud/kubeblocks/apis/apps/v1beta1"
 )
 
 // GetParameterFromConfiguration gets configure parameter
 // ctx: apiserver context
 // cli: apiserver client
-// cluster: appsv1alpha1.Cluster
+// cluster: appsv1.Cluster
 // component: component name
 func GetParameterFromConfiguration(configMap *corev1.ConfigMap, allFiles bool, fieldPath ...string) ([]string, error) {
 	if configMap == nil || len(configMap.Data) == 0 {
@@ -42,7 +42,7 @@ func GetParameterFromConfiguration(configMap *corev1.ConfigMap, allFiles bool, f
 	wrapCfg, err := NewConfigLoader(CfgOption{
 		Type:           CfgCmType,
 		Log:            log.FromContext(context.Background()),
-		CfgType:        appsv1alpha1.Ini,
+		CfgType:        appsv1beta1.Ini,
 		ConfigResource: FromConfigData(configMap.Data, nil),
 	})
 	if err != nil {
